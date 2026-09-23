@@ -1,0 +1,472 @@
+一、AMP相关核心概念与场景分析（前置认知要求）
+1. 什么是AMP
+AMP（Asymmetric Multiprocessing，非对称多处理）是多处理器架构的一种工作模式，核心特点是多个 CPU 核心独立运行不同的操作系统（或裸机程序），各核心有明确的角色分工与独立的任务空间，核心间通过预设的通信机制（如共享内存、Mailbox、RPMsg 等）实现数据交互与协同，不依赖统一的操作系统调度。
+对于 RK3588 开发板而言，其 CPU 采用 8 核异构架构，由 4 个 Cortex-A55 小核和 4 个 Cortex-A76 大核组成。AMP 模式通常表现为 Linux 与 RTOS 分别运行在不同 CPU 核心上，各自承担专属任务。
+本项目中，Linux 系统继续运行于大部分 CPU 核心并保持 SMP 多核调度，单独划分一个 Cortex-A55 核运行 FreeRTOS，用于实时任务处理。第一版计划将 cpu_l3（Cortex-A55，MPIDR 0x300）作为 FreeRTOS 独立运行核心。
+
+---
+2. AMP的使用场景
+· 实时控制与数据处理场景：如工业自动化系统中，Linux 负责界面显示、网络通信、数据存储和复杂业务处理，FreeRTOS 负责电机控制、实时采样、GPIO 中断等实时任务。
+· 异构任务协同场景：需要同时运行复杂通用任务与实时任务的场景，如基于 RK3588 AMP 模式实现“Linux 界面显示 + FreeRTOS 实时控制”的智能终端开发、“Linux 网络通信 + FreeRTOS 数据采集”的边缘计算设备开发。
+· 高稳定性要求场景：如车载设备、工业设备等，将复杂 Linux 业务与实时控制任务运行在不同 CPU 核心上，通过 CPU、内存及外设资源隔离减少系统之间的相互影响，提高系统稳定性。
+· 多核资源利用场景：根据任务需求合理划分 RK3588 多核 CPU 资源，使 Linux 继续发挥多核通用计算能力，同时划分独立 Cortex-A55 核运行轻量级 RTOS，提高多核 SoC 的资源利用效率。
+二、实践核心目标
+· 掌握 RK3588 AMP 工作模式的核心原理与架构特点，明确 Linux 与 FreeRTOS 的 CPU 核心角色分配逻辑。
+· 完成 RK3588 AMP 模式环境搭建与配置，实现 Linux 与 FreeRTOS 在不同 CPU 核心上的独立启动和独立运行。
+· 将指定 Cortex-A55 核从 Linux CPU 调度体系中隔离，独立运行 FreeRTOS，其余 CPU 核心继续运行 Linux。
+· 完成 Linux 与 FreeRTOS 的任务分配与程序开发，实现不同系统之间的数据通信与协同工作，如 FreeRTOS 负责传感器采集和实时控制，Linux 负责数据显示、网络通信与用户交互。
+· 实现基于共享内存、Mailbox 或 RPMsg 的 Linux 与 FreeRTOS 双向通信。
+· 排查实践过程中的核心启动失败、镜像加载失败、内存冲突、通信异常、中断异常等问题，形成规范的项目记录与总结，具备 RK3588 AMP 模式的实操与调试能力。
+三、实践任务一：RK3588 AMP模式环境搭建与配置验证（核心：实现多核心独立启动）
+核心要求
+· 完成 Linux 与 FreeRTOS 的 AMP 环境配置与镜像编译，根据 CPU 核心角色划分实现不同系统独立运行。
+· Linux 保持 SMP 多核运行模式，仅将指定 Cortex-A55 核从 Linux CPU 拓扑中隔离。
+· FreeRTOS 独立运行于指定 Cortex-A55 核。
+· 完成 FreeRTOS ARM64 固件生成，并通过 Rockchip AMP 启动机制实现指定 CPU 核启动。
+具体实现过程
+步骤1：基础开发环境搭建
+准备 RK3588 Linux SDK、交叉编译工具链及 FreeRTOS 源码。
+FreeRTOS 选择：
+FreeRTOS Kernel V10.5.1
+项目目录可规划为：
+RK3588_AMP_Controller/
+├── board/
+├── common/
+├── linux/
+├── rtos/
+├── scripts/
+├── tests/
+└── third_party/
+    └── FreeRTOS-Kernel/
+FreeRTOS 使用 ARM64 A-profile Port，并针对 RK3588 Cortex-A55、GICv3 和 EL1 运行环境进行适配。
+本项目采用：
+portable/GCC/ARM_CA53_64_BIT_SRE/
+作为 FreeRTOS ARM64 移植基础，不采用 ARM_CA9 等 32 位 Port。
+
+---
+步骤2：U-Boot配置与AMP引导
+进入 RK3588 Linux SDK 的 U-Boot 目录：
+cd ~/rk3588_linux_sdk/u-boot
+启用 Rockchip AMP 支持：
+CONFIG_AMP=y
+CONFIG_ROCKCHIP_AMP=y
+RK3588 不采用手工执行 secondary_cpu_boot 的简单启动方式，而是使用 Rockchip SDK 已提供的 AMP Framework，通过 AMP FIT Image 描述 FreeRTOS 镜像。
+创建 FreeRTOS AMP 镜像配置，例如：
+freertos {
+    description = "rk3588-freertos-a55";
+
+    data = /incbin/("./freertos.bin");
+
+    type = "firmware";
+
+    compression = "none";
+
+    arch = "arm64";
+
+    cpu = <0x300>;
+
+    hyp = <0>;
+
+    load = <0x08400000>;
+
+    boot-on = <1>;
+
+    hash {
+        algo = "sha256";
+    };
+};
+其中：
+arch = arm64
+表示 FreeRTOS 使用 AArch64 架构。
+cpu = 0x300
+表示目标运行核心为 cpu_l3 Cortex-A55。
+FreeRTOS 镜像通过 FIT Image 打包生成：
+amp.img
+U-Boot 启动 AMP 镜像后，通过 PSCI / SMC 请求 Trusted Firmware 拉起指定 CPU，并跳转到 FreeRTOS 固件入口。
+整体启动过程：
+U-Boot
+↓
+amp.img
+↓
+Rockchip AMP
+↓
+PSCI CPU_ON
+↓
+BL31 / Trusted Firmware
+↓
+Cortex-A55
+↓
+FreeRTOS
+
+---
+步骤3：Linux内核与设备树AMP配置
+1. CPU核心隔离
+Linux 不关闭 SMP，而是继续运行于其余 CPU 核心。
+通过 RK3588 AMP Device Tree 将 FreeRTOS 使用的 Cortex-A55 核从 Linux CPU 拓扑中移除。
+第一版采用：
+cpu_l3
+Cortex-A55
+MPIDR = 0x300
+用于运行 FreeRTOS。
+设备树配置思想：
+cpus {
+    cpu-map {
+        cluster0 {
+            /delete-node/ core3;
+        };
+    };
+};
+
+/delete-node/ &cpu_l3;
+使 Linux 不再调度该 CPU，从而实现 Linux 与 FreeRTOS 的 CPU 核心隔离。
+
+---
+2. AMP内存划分
+使用 Device Tree 对 Linux、FreeRTOS 和核心间通信内存进行划分，避免不同系统同时使用同一物理内存。
+Rockchip RK3588 AMP 方案中规划：
+AMP共享内存：
+0x07800000
+大小4MB
+
+RPMsg区域：
+0x07C00000
+大小4MB
+
+RPMsg DMA：
+0x08000000
+大小1MB
+同时为 FreeRTOS 独立划分固件与运行内存区域。
+第一版规划：
+FreeRTOS运行区域：
+
+0x08400000
+~
+0x093FFFFF
+
+大小16MB
+Linux 不使用该区域，从而避免 Linux 与 FreeRTOS 发生内存冲突。
+
+---
+3. Linux内核编译
+RK3588 使用 ARM64 架构，因此 Linux 内核采用：
+ARCH=arm64
+而不是 ARM32。
+编译目标为：
+Image
+dtbs
+最终得到：
+arch/arm64/boot/Image
+以及对应 RK3588 AMP Device Tree。
+完成 Linux 内核及设备树更新后，使 Linux 启动时能够正确识别 AMP CPU、内存及通信资源划分。
+步骤4：RTOS（FreeRTOS）配置修改与编译
+1. FreeRTOS ARM64适配
+进入 FreeRTOS 工程目录，使用：
+portable/GCC/ARM_CA53_64_BIT_SRE
+作为 RK3588 Cortex-A55 的 FreeRTOS Port 基础。
+该 Port 使用 AArch64，并支持 GICv3 System Register Interface。
+根据 RK3588 AMP 运行环境完成：
+EL1
+GICv3
+ARM Generic Timer
+UART
+Startup
+Linker Script
+等 BSP 适配。
+
+---
+2. 创建FreeRTOS工程文件
+RTOS 工程主要包括：
+startup.S
+linker.ld
+main.c
+FreeRTOSConfig.h
+uart.c
+uart.h
+gic.c
+gic.h
+timer.c
+timer.h
+其中：
+startup.S：完成 FreeRTOS CPU 启动入口、栈初始化、BSS 清零及进入 C 程序。
+linker.ld：定义 FreeRTOS 固件链接地址及内存布局。
+uart.c：实现 RTOS 调试串口。
+gic.c：完成 GICv3 中断控制相关初始化。
+timer.c：配置 ARM Generic Timer，为 FreeRTOS Tick 提供时钟。
+FreeRTOSConfig.h：配置 FreeRTOS 调度器、任务优先级、堆栈大小等参数。
+
+---
+3. FreeRTOS配置
+FreeRTOS 在一个 CPU 核心上独立运行，因此关闭 FreeRTOS SMP：
+#define configUSE_SMP 0
+配置任务优先级：
+#define configMAX_PRIORITIES 5
+配置最小任务栈：
+#define configMINIMAL_STACK_SIZE 128
+FreeRTOS Tick 使用 ARM Generic Timer，根据系统定时器频率进行配置，不直接将 CPU 主频固定写为 1.5 GHz。
+
+---
+4. FreeRTOS任务设计
+创建传感器采集和控制任务，例如：
+void vTaskSensor(void *pvParameters)
+{
+    while(1)
+    {
+        /* 读取AHT10温湿度 */
+
+        /* 更新共享数据 */
+
+        /* 根据温度控制风扇 */
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+主程序：
+int main(void)
+{
+    /* 初始化UART */
+
+    /* 初始化GIC */
+
+    /* 初始化Generic Timer */
+
+    /* 初始化传感器和控制外设 */
+
+    xTaskCreate(vTaskSensor,
+                "SensorTask",
+                configMINIMAL_STACK_SIZE,
+                NULL,
+                1,
+                NULL);
+
+    vTaskStartScheduler();
+
+    while(1);
+
+    return 0;
+}
+第一阶段先完成 FreeRTOS 独立启动，之后再逐步启动 FreeRTOS Scheduler 和实时任务。
+步骤5：镜像生成、烧写与启动验证
+FreeRTOS 编译后生成：
+freertos.elf
+freertos.bin
+并将 freertos.bin 打包到：
+amp.img
+FreeRTOS 固件加载地址与链接地址保持一致。
+第一版规划：
+0x08400000
+启动开发板后验证：
+Linux正常启动
++
+FreeRTOS正常启动
+FreeRTOS 可通过 UART 调试输出：
+[AMP] RK3588 FreeRTOS boot OK
+验证指定 Cortex-A55 核已脱离 Linux CPU 调度体系并独立运行 FreeRTOS。
+四、实践任务二：Linux与FreeRTOS核心间通信
+核心要求
+完成 Linux 与 FreeRTOS 之间的数据交互，实现：
+FreeRTOS → Linux
+以及：
+Linux → FreeRTOS
+双向通信。
+优先使用共享内存完成基本通信验证，后续结合 Rockchip Mailbox 和 RPMsg 完善通信机制。
+具体实现过程
+步骤1：共享内存配置
+使用 RK3588 AMP Device Tree 已规划的共享内存区域：
+0x07800000
+大小：
+4MB
+作为 Linux 与 FreeRTOS 的共享数据区域。
+Linux 和 FreeRTOS 使用统一的数据结构，例如：
+typedef struct
+{
+    float temp;
+
+    float hum;
+
+    uint32_t fan_speed;
+
+    uint32_t command;
+
+    uint32_t sequence;
+} AMP_SharedData;
+确保两个系统的数据类型、数据结构、对齐方式和字节序保持一致。
+
+---
+步骤2：FreeRTOS通信逻辑实现
+FreeRTOS 每隔 100 ms 读取 AHT10 温湿度数据，并将数据写入共享内存。
+同时根据温度自动控制风扇转速，将风扇当前状态写入共享内存。
+FreeRTOS 同时检查 Linux 下发的控制命令，例如：
+FAN_LOW
+FAN_MIDDLE
+FAN_HIGH
+收到新命令后调整风扇状态，并将执行结果反馈至 Linux。
+整体流程：
+AHT10
+↓
+FreeRTOS采集
+↓
+Shared Memory
+↓
+Linux
+以及：
+Linux控制命令
+↓
+Shared Memory
+↓
+FreeRTOS
+↓
+风扇控制
+
+---
+步骤3：Linux通信逻辑实现
+Linux 应用程序 amp_linux_app 周期读取 FreeRTOS 写入的共享数据。
+主要功能：
+读取温度
+
+读取湿度
+
+读取风扇状态
+
+显示数据
+
+接收用户控制命令
+
+向FreeRTOS发送控制命令
+Linux 显示示例：
+温度：28.5℃
+湿度：50%RH
+风扇：中速
+用户通过 Linux 输入：
+fan high
+Linux 将控制命令写入通信区域，FreeRTOS 接收后将风扇调整为高速。
+后续可进一步将共享内存通信升级为：
+Shared Memory
++
+Mailbox
++
+RPMsg
+形成完整的 Linux / FreeRTOS IPC 通信机制。
+五、核心间协同工作验证
+1. 双系统运行验证
+开发板启动后，确保：
+Debian Linux正常运行
+
+FreeRTOS正常运行
+Linux 与 FreeRTOS 分别运行于不同 CPU 核心，两侧任务互不依赖统一操作系统调度。
+
+---
+2. 数据采集验证
+FreeRTOS 每隔 100 ms 读取 AHT10 温湿度数据并发送给 Linux。
+Linux 接收后进行数据显示：
+温度：28.5℃
+湿度：50%RH
+风扇：中速
+验证 Linux 显示数据与 FreeRTOS 采集数据保持一致。
+
+---
+3. 控制指令验证
+用户向 Linux 输入：
+fan high
+Linux 将控制命令发送至 FreeRTOS。
+FreeRTOS 接收后：
+解析命令
+↓
+执行风扇高速控制
+↓
+更新风扇状态
+↓
+返回Linux
+Linux 显示：
+风扇：高速
+验证 Linux 到 FreeRTOS 的反向控制链路正常。
+
+---
+4. 通信性能验证
+记录 Linux 发送控制命令到 FreeRTOS 实际执行的时间。
+目标：
+通信与控制响应延迟 ≤ 20 ms
+实际时延以后续测试结果为准。
+同时观察：
+数据是否丢失
+
+数据是否错乱
+
+是否出现重复数据
+
+通信是否卡死
+
+---
+5. 稳定性验证
+系统连续运行至少：
+30 min
+观察：
+FreeRTOS：温湿度采集稳定，实时任务正常运行，风扇控制正常，无任务崩溃。
+Linux：数据显示正常，用户交互正常，无系统卡顿。
+通信：Linux 与 FreeRTOS 双向数据交互稳定，无明显数据丢失或通信阻塞。
+后续可进一步进行：
+1h
+8h
+24h
+长时间稳定性测试。
+六、问题排查要求
+若出现 FreeRTOS 无法启动，重点排查：
+AMP镜像配置
+
+CPU MPIDR
+
+FreeRTOS加载地址
+
+FreeRTOS链接地址
+
+PSCI CPU_ON
+
+Startup初始化
+
+EL运行级别
+若出现 Linux 与 FreeRTOS 通信失败，重点排查：
+共享内存地址
+
+Device Tree reserved-memory
+
+数据结构一致性
+
+Cache一致性
+
+Memory Barrier
+
+Mailbox / RPMsg配置
+若出现 FreeRTOS 中断或任务调度异常，重点排查：
+GICv3配置
+
+ICC系统寄存器
+
+VBAR_EL1
+
+ARM Generic Timer
+
+FreeRTOS Tick
+
+IRQ优先级
+若出现 UART 无输出，重点检查：
+UART时钟
+
+Pinmux
+
+波特率
+
+MMIO地址
+FreeRTOS 调试串口优先使用 RK3588 AMP 配置中的 UART5。
+七、最终实践成果
+完成本实践后，应形成以下成果：
+· RK3588 Debian Linux + FreeRTOS AMP 双系统运行环境。
+· Linux 与 FreeRTOS CPU 核心隔离方案。
+· FreeRTOS ARM64 BSP，包括启动、GICv3、中断、Timer 和 UART 等基础模块。
+· Rockchip AMP FIT 镜像及启动配置。
+· Linux 与 FreeRTOS 共享内存通信程序。
+· Mailbox / RPMsg 双向通信验证。
+· AHT10 温湿度实时采集功能。
+· FreeRTOS 风扇实时控制功能。
+· Linux 数据显示和控制指令发送功能。
+· AMP 通信延迟及稳定性测试结果。
+· RK3588 AMP 双系统搭建、通信与异常排查实践文档。
+这版才是“题目/任务书版本”：描述的是你接下来要完成什么，不把我们前面那些 grep、dmesg、/proc/iomem 等开发板调查过程混进任务正文。

@@ -1,0 +1,52 @@
+
+build/amp_bootstrap.elf:     file format elf64-littleaarch64
+
+
+Disassembly of section .text:
+
+0000000008400000 <_start>:
+ 8400000:	d5034fdf 	msr	daifset, #0xf
+ 8400004:	d5033fdf 	isb
+ 8400008:	580001c0 	ldr	x0, 8400040 <_start+0x40>
+ 840000c:	9100001f 	mov	sp, x0
+ 8400010:	580001c0 	ldr	x0, 8400048 <_start+0x48>
+ 8400014:	580001e1 	ldr	x1, 8400050 <_start+0x50>
+ 8400018:	eb01001f 	cmp	x0, x1
+ 840001c:	54000062 	b.cs	8400028 <_start+0x28>  // b.hs, b.nlast
+ 8400020:	f800841f 	str	xzr, [x0], #8
+ 8400024:	17fffffd 	b	8400018 <_start+0x18>
+ 8400028:	d5033f9f 	dsb	sy
+ 840002c:	d5033fdf 	isb
+ 8400030:	9400000c 	bl	8400060 <amp_main>
+ 8400034:	d503205f 	wfe
+ 8400038:	17ffffff 	b	8400034 <_start+0x34>
+ 840003c:	00000000 	udf	#0
+ 8400040:	09400000 	.word	0x09400000
+ 8400044:	00000000 	.word	0x00000000
+ 8400048:	08400100 	.word	0x08400100
+ 840004c:	00000000 	.word	0x00000000
+ 8400050:	08400100 	.word	0x08400100
+	...
+
+0000000008400060 <amp_main>:
+ 8400060:	d5384241 	mrs	x1, currentel
+ 8400064:	d53800a2 	mrs	x2, mpidr_el1
+ 8400068:	d2a127c0 	mov	x0, #0x93e0000             	// #155058176
+ 840006c:	f900001f 	str	xzr, [x0]
+ 8400070:	d5033f9f 	dsb	sy
+ 8400074:	d3420c21 	ubfx	x1, x1, #2, #2
+ 8400078:	f9000401 	str	x1, [x0, #8]
+ 840007c:	f9000802 	str	x2, [x0, #16]
+ 8400080:	d2800021 	mov	x1, #0x1                   	// #1
+ 8400084:	f9000c01 	str	x1, [x0, #24]
+ 8400088:	d5033f9f 	dsb	sy
+ 840008c:	d28b54a1 	mov	x1, #0x5aa5                	// #23205
+ 8400090:	f2ab54a1 	movk	x1, #0x5aa5, lsl #16
+ 8400094:	f2cab4a1 	movk	x1, #0x55a5, lsl #32
+ 8400098:	f2f4ab41 	movk	x1, #0xa55a, lsl #48
+ 840009c:	f9000001 	str	x1, [x0]
+ 84000a0:	d5033f9f 	dsb	sy
+ 84000a4:	d5033fdf 	isb
+ 84000a8:	d503205f 	wfe
+ 84000ac:	d503205f 	wfe
+ 84000b0:	17fffffe 	b	84000a8 <amp_main+0x48>
