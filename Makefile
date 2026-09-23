@@ -29,7 +29,9 @@ LDFLAGS := \
 
 OBJS := \
 	$(BUILD_DIR)/startup.o \
-	$(BUILD_DIR)/main.o
+	$(BUILD_DIR)/vector.o \
+	$(BUILD_DIR)/main.o \
+	$(BUILD_DIR)/irq_timer.o
 
 all: $(BUILD_DIR)/amp_bootstrap.bin
 
@@ -39,11 +41,17 @@ $(BUILD_DIR):
 $(BUILD_DIR)/startup.o: board/rk3588/startup.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/main.o: rtos/main.c | $(BUILD_DIR)
+$(BUILD_DIR)/vector.o: board/rk3588/vector.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/amp_bootstrap.elf: $(OBJS)
-	$(CC) $(LDFLAGS) $^ -o $@
+$(BUILD_DIR)/main.o: rtos/main.c rtos/irq_timer.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/irq_timer.o: rtos/irq_timer.c rtos/irq_timer.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/amp_bootstrap.elf: $(OBJS) board/rk3588/linker.ld
+	$(CC) $(LDFLAGS) $(OBJS) -o $@
 
 $(BUILD_DIR)/amp_bootstrap.bin: $(BUILD_DIR)/amp_bootstrap.elf
 	$(OBJCOPY) -O binary $< $@

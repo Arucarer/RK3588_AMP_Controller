@@ -3,7 +3,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x08400000, LENGTH = 16M
+    RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 16M
 }
 
 SECTIONS
@@ -13,6 +13,8 @@ SECTIONS
     .text :
     {
         KEEP(*(.text.boot))
+        . = ALIGN(2048);
+        KEEP(*(.text.vectors))
         *(.text*)
     } > RAM
 
@@ -39,15 +41,10 @@ SECTIONS
     . = ALIGN(4096);
     __image_end__ = .;
 
-    /*
-     * 0x093E0000：第一次启动的调试信息区域
-     *
-     * 0x093F0000 ~ 0x093FFFFF：
-     * 初始启动栈，64 KiB
-     */
-    __boot_flag   = 0x093E0000;
-    __stack_bottom = 0x093F0000;
-    __stack_top    = 0x09400000;
+    /* Boot flag and initial 64 KiB stack within RTOS RAM. */
+    __boot_flag    = ORIGIN(RAM) + LENGTH(RAM) - 0x20000;
+    __stack_bottom = ORIGIN(RAM) + LENGTH(RAM) - 0x10000;
+    __stack_top    = ORIGIN(RAM) + LENGTH(RAM);
 
     ASSERT(__image_end__ < __boot_flag, "AMP image is too large")
 }

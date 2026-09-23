@@ -1,7 +1,11 @@
 typedef unsigned long long uint64_t;
 
+#include "irq_timer.h"
+
 #define AMP_BOOT_MAGIC      0xA55A55A55AA55AA5ULL
-#define AMP_BOOT_FLAG_ADDR  0x093E0000ULL
+#define AMP_BOOT_FLAG_ADDR  0x20FE0000ULL
+/* Keep disabled for the first normal-boot check. */
+#define AMP_EXCEPTION_SELFTEST 0
 
 typedef struct
 {
@@ -75,6 +79,11 @@ void amp_main(void)
     __asm__ volatile("dsb sy" ::: "memory");
     __asm__ volatile("isb");
 
+    #if AMP_EXCEPTION_SELFTEST
+        __asm__ volatile("brk #0x123" ::: "memory");
+    #endif
+    
+    amp_timer_test();
     while(1)
     {
         __asm__ volatile("wfe");
