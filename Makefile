@@ -53,6 +53,7 @@ LDFLAGS := \
 C_SRCS := \
 	rtos/main.c \
 	rtos/irq_timer.c \
+	rtos/shared_memory.c \
 	rtos/runtime.c \
 	$(FREERTOS_DIR)/tasks.c \
 	$(FREERTOS_DIR)/queue.c \

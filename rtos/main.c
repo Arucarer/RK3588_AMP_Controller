@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "shared_memory.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "irq_timer.h"
@@ -174,6 +175,8 @@ void amp_main(void)
     rtos_info->stage = 2;
     barrier();
 
+    amp_ipc_init();
+
     /*
      * Stack depth is in StackType_t units:
      * 512 entries = 4096 bytes on this AArch64 Port.
@@ -194,6 +197,16 @@ void amp_main(void)
                          NULL,
                          1,
                          NULL);
+
+    if (result != pdPASS)
+        rtos_stop(4);
+
+    result = xTaskCreate(amp_ipc_task,
+                        "IPC",
+                        configMINIMAL_STACK_SIZE,
+                        NULL,
+                        2,
+                        NULL);
 
     if (result != pdPASS)
         rtos_stop(4);

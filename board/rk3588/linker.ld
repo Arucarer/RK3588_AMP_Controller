@@ -46,5 +46,6 @@ SECTIONS
     __stack_bottom = ORIGIN(RAM) + LENGTH(RAM) - 0x10000;
     __stack_top    = ORIGIN(RAM) + LENGTH(RAM);
 
-    ASSERT(__image_end__ < __boot_flag, "AMP image is too large")
+    __ipc_base = 0x20FD0000;
+    ASSERT(__image_end__ <= __ipc_base, "AMP image overlaps IPC area")
 }
