@@ -1,11 +1,13 @@
 #include <stdint.h>
+#include "FreeRTOS.h"
+#include "task.h"
 #include "irq_timer.h"
 
 #define GICR_BASE       0xFE680000ULL
 #define GICR_END        0xFE780000ULL
 #define TIMER_INTID     30U
 #define TIMER_MASK      (1U << TIMER_INTID)
-#define TEST_HZ         100U
+
 
 #define READ_SYS(reg) ({                         \
     uint64_t value;                              \
@@ -117,10 +119,8 @@ static uint64_t find_redistributor(void)
     return 0;
 }
 
-void amp_timer_test(void)
+void amp_wait_for_start(void)
 {
-    uint64_t base, sgi, sre, frequency;
-    uint32_t value;
     unsigned int i;
     volatile uint64_t *words =
         (volatile uint64_t *)(uintptr_t)info;
@@ -143,7 +143,19 @@ void amp_timer_test(void)
         __asm__ volatile("yield");
 
     barrier();
+}
+
+/*
+ * Called by xPortStartScheduler() with CPU IRQs masked.
+ * Do not unmask IRQs here: the Port restores the first task.
+ */
+void amp_setup_tick(void)
+{
+    uint64_t base, sgi, sre, frequency;
+    uint32_t value;
+
     info->stage = 2;
+    barrier();
 
     /* A trap here is caught by the existing exception recorder. */
     WRITE_SYS(cntp_ctl_el0, 0);
@@ -152,10 +164,10 @@ void amp_timer_test(void)
     frequency = READ_SYS(cntfrq_el0);
     info->counter_hz = frequency;
 
-    if (frequency < TEST_HZ)
+    if (frequency < (uint64_t)configTICK_RATE_HZ)
         stop_test(1);
 
-    timer_period = frequency / TEST_HZ;
+    timer_period = frequency / (uint64_t)configTICK_RATE_HZ;
     info->period = timer_period;
 
     base = find_redistributor();
@@ -190,9 +202,9 @@ void amp_timer_test(void)
     value = read32(sgi + 0xC04);
     write32(sgi + 0xC04, value & ~(2U << 28));
 
-    /* Priority byte for INTID 30. */
     *(volatile uint8_t *)(uintptr_t)(sgi + 0x400 + TIMER_INTID)
-        = 0xA0;
+        = (uint8_t)(portLOWEST_USABLE_INTERRUPT_PRIORITY
+                    << portPRIORITY_SHIFT);
 
     write32(sgi + 0x280, TIMER_MASK); /* Clear pending */
     write32(sgi + 0x380, TIMER_MASK); /* Clear active */
@@ -212,9 +224,19 @@ void amp_timer_test(void)
     WRITE_SYS(S3_0_C12_C12_7, 1);
     barrier();
 
-    /* Preserve EOI mode; handler supports either mode. */
+    /*
+     * This FreeRTOS Port writes EOIR but does not write DIR.
+     * Require combined priority-drop/deactivation mode.
+     */
     cpu_ctlr = READ_SYS(S3_0_C12_C12_4);
     info->icc_ctlr = cpu_ctlr;
+
+    if (cpu_ctlr & (1ULL << 1))
+        stop_test(10);
+
+    /* Confirm the priority width used by FreeRTOSConfig.h. */
+    if (((cpu_ctlr >> 8) & 7ULL) != 4ULL)
+        stop_test(11);
 
     write32(sgi + 0x100, TIMER_MASK);
     barrier();
@@ -239,49 +261,47 @@ void amp_timer_test(void)
     info->stage = 5;
     barrier();
 
-    __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
-
-    for (;;)
-        __asm__ volatile("wfi");
+    /*
+     * Return to xPortStartScheduler().
+     * IRQs remain masked until the first task is restored.
+     */
 }
 
-void amp_irq_handler(void)
+/*
+ * Called by FreeRTOS_Tick_Handler() before it permits nesting.
+ * Rearm the timer to remove the level-triggered interrupt source.
+ */
+void amp_clear_tick(void)
 {
-    uint64_t iar = READ_SYS(S3_0_C12_C12_0);
+    uint64_t now = READ_SYS(cntpct_el0);
+
+    WRITE_SYS(cntp_cval_el0, now + timer_period);
+    info->last_counter = now;
+    info->irq_count++;
+    info->stage = 6;
+
+    barrier();
+}
+
+/*
+ * FreeRTOS_IRQ_Handler already read ICC_IAR1_EL1.
+ * The interrupt acknowledge value arrives in the first argument.
+ * The Port performs EOI after this function returns.
+ */
+void vApplicationIRQHandler(uint64_t iar)
+{
     uint32_t intid = (uint32_t)(iar & 0xFFFFFFU);
-    uint64_t now;
-    int unexpected = 0;
-
-    __asm__ volatile("isb" ::: "memory");
-
-    /* Special/spurious IDs must not be EOI'd. */
-    if (intid >= 1020 && intid <= 1023)
-        return;
 
     info->last_intid = intid;
 
+    if (intid >= 1020U && intid <= 1023U)
+        return;
+
     if (intid == TIMER_INTID) {
-        now = READ_SYS(cntpct_el0);
-
-        /* Rearm before completing the level-triggered IRQ. */
-        WRITE_SYS(cntp_cval_el0, now + timer_period);
-        info->last_counter = now;
-        info->irq_count++;
-        info->stage = 6;
-    } else {
-        info->unexpected++;
-        unexpected = 1;
+        FreeRTOS_Tick_Handler();
+        return;
     }
 
-    barrier();
-    WRITE_SYS(S3_0_C12_C12_1, iar);
-    __asm__ volatile("isb" ::: "memory");
-
-    if (cpu_ctlr & (1ULL << 1)) {
-        WRITE_SYS(S3_0_C12_C11_1, iar);
-        __asm__ volatile("isb" ::: "memory");
-    }
-
-    if (unexpected)
-        stop_test(8);
+    info->unexpected++;
+    stop_test(8);
 }
