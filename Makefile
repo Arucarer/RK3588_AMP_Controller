@@ -22,6 +22,7 @@ CFLAGS := \
 	-std=gnu11 \
 	-march=armv8-a \
 	-mgeneral-regs-only \
+	-mstrict-align \
 	-ffreestanding \
 	-fno-builtin \
 	-fno-stack-protector \
@@ -59,6 +60,8 @@ C_SRCS := \
 	$(FREERTOS_DIR)/queue.c \
 	$(FREERTOS_DIR)/list.c \
 	$(FREERTOS_DIR)/portable/MemMang/heap_4.c \
+	common/amp_message.c \
+	common/amp_transport.c \
 	$(PORT_DIR)/port.c
 
 ASM_SRCS := \
