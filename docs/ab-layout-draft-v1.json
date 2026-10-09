@@ -1,0 +1,201 @@
+{
+  "status": "DRAFT_NOT_EXECUTABLE",
+  "board": "ATK-DLRK3588B",
+  "device": "/dev/mmcblk0",
+  "sector_bytes": 512,
+  "disk_sectors": 120832000,
+  "last_usable_sector": 120831966,
+  "expected_current_partitions": [
+    {
+      "number": 1,
+      "name": "uboot",
+      "start_sector": 16384,
+      "sectors": 8192,
+      "end_sector": 24575,
+      "bytes": 4194304
+    },
+    {
+      "number": 2,
+      "name": "misc",
+      "start_sector": 24576,
+      "sectors": 8192,
+      "end_sector": 32767,
+      "bytes": 4194304
+    },
+    {
+      "number": 3,
+      "name": "boot",
+      "start_sector": 32768,
+      "sectors": 131072,
+      "end_sector": 163839,
+      "bytes": 67108864
+    },
+    {
+      "number": 4,
+      "name": "recovery",
+      "start_sector": 163840,
+      "sectors": 262144,
+      "end_sector": 425983,
+      "bytes": 134217728
+    },
+    {
+      "number": 5,
+      "name": "amp",
+      "start_sector": 425984,
+      "sectors": 65536,
+      "end_sector": 491519,
+      "bytes": 33554432
+    },
+    {
+      "number": 6,
+      "name": "rootfs",
+      "start_sector": 491520,
+      "sectors": 29360128,
+      "end_sector": 29851647,
+      "bytes": 15032385536
+    },
+    {
+      "number": 7,
+      "name": "oem",
+      "start_sector": 29851648,
+      "sectors": 262144,
+      "end_sector": 30113791,
+      "bytes": 134217728
+    },
+    {
+      "number": 8,
+      "name": "userdata",
+      "start_sector": 30113792,
+      "sectors": 90718175,
+      "end_sector": 120831966,
+      "bytes": 46447705600
+    }
+  ],
+  "proposed_partitions": [
+    {
+      "number": 1,
+      "name": "uboot",
+      "start_sector": 16384,
+      "sectors": 8192,
+      "end_sector": 24575,
+      "bytes": 4194304
+    },
+    {
+      "number": 2,
+      "name": "misc",
+      "start_sector": 24576,
+      "sectors": 8192,
+      "end_sector": 32767,
+      "bytes": 4194304
+    },
+    {
+      "number": 3,
+      "name": "boot",
+      "start_sector": 32768,
+      "sectors": 131072,
+      "end_sector": 163839,
+      "bytes": 67108864
+    },
+    {
+      "number": 4,
+      "name": "recovery",
+      "start_sector": 163840,
+      "sectors": 262144,
+      "end_sector": 425983,
+      "bytes": 134217728
+    },
+    {
+      "number": 5,
+      "name": "amp",
+      "start_sector": 425984,
+      "sectors": 65536,
+      "end_sector": 491519,
+      "bytes": 33554432
+    },
+    {
+      "number": 6,
+      "name": "rootfs",
+      "start_sector": 491520,
+      "sectors": 29360128,
+      "end_sector": 29851647,
+      "bytes": 15032385536
+    },
+    {
+      "number": 7,
+      "name": "oem",
+      "start_sector": 29851648,
+      "sectors": 262144,
+      "end_sector": 30113791,
+      "bytes": 134217728
+    },
+    {
+      "number": 8,
+      "name": "userdata",
+      "start_sector": 30113792,
+      "sectors": 61151232,
+      "end_sector": 91265023,
+      "bytes": 31309430784
+    },
+    {
+      "number": 9,
+      "name": "boot_b",
+      "start_sector": 91265024,
+      "sectors": 131072,
+      "end_sector": 91396095,
+      "bytes": 67108864
+    },
+    {
+      "number": 10,
+      "name": "amp_b",
+      "start_sector": 91396096,
+      "sectors": 65536,
+      "end_sector": 91461631,
+      "bytes": 33554432
+    },
+    {
+      "number": 11,
+      "name": "rootfs_b",
+      "start_sector": 91461632,
+      "sectors": 29360128,
+      "end_sector": 120821759,
+      "bytes": 15032385536
+    },
+    {
+      "number": 12,
+      "name": "abmeta",
+      "start_sector": 120821760,
+      "sectors": 8192,
+      "end_sector": 120829951,
+      "bytes": 4194304
+    }
+  ],
+  "slots": {
+    "a": {
+      "boot": "boot",
+      "rootfs": "rootfs",
+      "amp": "amp"
+    },
+    "b": {
+      "boot": "boot_b",
+      "rootfs": "rootfs_b",
+      "amp": "amp_b"
+    }
+  },
+  "migration_requirements": [
+    "备份 userdata 并验证备份可读",
+    "通过独立恢复环境启动，确保 userdata 未挂载",
+    "离线检查并缩小 userdata 文件系统，之后才能缩小分区",
+    "重新核对 GPT 可用项数量、主备 GPT 和所有边界",
+    "为 B 槽分配独立 PARTUUID，不复制 A 槽分区 UUID"
+  ],
+  "bootloader_requirements": [
+    "定义带版本、序号和校验的双副本持久化启动元数据",
+    "在首次加载内核设备树或 AMP 镜像之前完成槽选择",
+    "FIT、内核设备树、rootfs 和 AMP 使用同一个选定槽",
+    "启动候选槽前持久化扣减尝试次数",
+    "Linux 与 FreeRTOS 健康确认后标记启动成功",
+    "启动失败后整机重启再回退，避免混用已运行的 AMP 固件",
+    "定义启动卡死时的看门狗或外部复位策略",
+    "接入签名验证后再接受远程升级包"
+  ]
+}

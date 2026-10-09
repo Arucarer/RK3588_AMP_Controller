@@ -22,6 +22,16 @@
 #define AMP_OP_PING            1U
 #define AMP_OP_GET_STATUS      2U
 #define AMP_OP_HELLO           3U
+/* LED control */
+#define AMP_OP_LED_SET          0x10U
+#define AMP_OP_LED_GET          0x11U
+
+#define AMP_LED_OFF             0U
+#define AMP_LED_ON              1U
+#define AMP_LED_BLINK           2U
+
+#define AMP_RESULT_HW_ERROR     7U
+
 
 /* 对端返回的处理结果 */
 #define AMP_RESULT_OK          0U

@@ -3,7 +3,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "shared_memory.h"
-
+#include "control_task.h"
+#include "monitor_task.h"
 #include "../common/amp_message.h"
 #include "../common/amp_transport.h"
 
@@ -24,6 +25,18 @@ static int have_cached_response;
 static AMPMessage cached_request;
 static AMPMessage cached_response;
 
+/* 已交给 ControlTask、尚未取回执行结果的请求。 */
+static int control_pending;
+static AMPMessage control_request;
+
+static uint32_t get_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
 static void put_u32(uint8_t *p, uint32_t value)
 {
     p[0] = (uint8_t)value;
@@ -33,22 +46,26 @@ static void put_u32(uint8_t *p, uint32_t value)
 }
 
 /*
- * 状态负载，共 32 字节，全部为小端 uint32：
- *
- * +0  ：状态格式版本，当前为 1
- * +4  ：FreeRTOS tick，仅用于诊断，允许回绕
- * +8  ：tick 频率
- * +12 ：格式正确的请求计数
- * +16 ：重复请求计数
- * +20 ：坏帧计数
- * +24 ：拒绝请求计数
- * +28 ：最近已处理的会话内请求序号
+ * 状态负载版本 2，共 64 字节，小端 uint32。
+ * +0..28：保留原状态字段，+0 的格式版本改为 2。
+ * +32：监控就绪
+ * +36：当前故障位
+ * +40：历史故障位
+ * +44：监控检查次数
+ * +48：IPC 运行标记距今毫秒数
+ * +52：Control 运行标记距今毫秒数
+ * +56：Monitor 检查距今毫秒数
+ * +60：LED 驱动故障
  */
 static void fill_status(AMPMessage *message)
 {
-    message->payload_length = 32U;
+    MonitorSnapshot health;
 
-    put_u32(message->payload + 0, 1U);
+    monitor_snapshot(&health);
+
+    message->payload_length = 64U;
+
+    put_u32(message->payload + 0, 2U);
     put_u32(message->payload + 4,
             (uint32_t)xTaskGetTickCount());
     put_u32(message->payload + 8,
@@ -58,6 +75,15 @@ static void fill_status(AMPMessage *message)
     put_u32(message->payload + 20, bad_frames);
     put_u32(message->payload + 24, rejected_requests);
     put_u32(message->payload + 28, last_sequence);
+
+    put_u32(message->payload + 32, health.ready);
+    put_u32(message->payload + 36, health.faults);
+    put_u32(message->payload + 40, health.latched_faults);
+    put_u32(message->payload + 44, health.checks);
+    put_u32(message->payload + 48, health.ipc_age_ms);
+    put_u32(message->payload + 52, health.control_age_ms);
+    put_u32(message->payload + 56, health.monitor_age_ms);
+    put_u32(message->payload + 60, health.led_fault);
 }
 
 static void response_begin(const AMPMessage *request,
@@ -101,6 +127,7 @@ static void cache_result(const AMPMessage *request,
     last_sequence = request->sequence;
     have_cached_response = 1;
 }
+
 
 static void handle_request(const AMPMessage *request,
                            AMPMessage *response)
@@ -192,6 +219,74 @@ static void handle_request(const AMPMessage *request,
         }
         break;
 
+    case AMP_OP_LED_SET:
+    case AMP_OP_LED_GET:
+    {
+        ControlCommand command = {0};
+
+        command.session = request->session;
+        command.sequence = request->sequence;
+
+        if (request->opcode == AMP_OP_LED_GET) {
+            if (request->payload_length != 0) {
+                response->status = AMP_RESULT_BAD_PAYLOAD;
+                break;
+            }
+
+            command.operation = CONTROL_LED_QUERY;
+        } else {
+            uint32_t mode;
+            uint32_t period_ms;
+
+            if (request->payload_length != 8U) {
+                response->status = AMP_RESULT_BAD_PAYLOAD;
+                break;
+            }
+
+            mode = get_u32(request->payload);
+            period_ms = get_u32(request->payload + 4);
+
+            if (mode == AMP_LED_OFF) {
+                command.operation = CONTROL_LED_OFF;
+            } else if (mode == AMP_LED_ON) {
+                command.operation = CONTROL_LED_ON;
+            } else if (mode == AMP_LED_BLINK) {
+                command.operation = CONTROL_LED_BLINK;
+            } else {
+                response->status = AMP_RESULT_BAD_PAYLOAD;
+                break;
+            }
+
+            if (mode == AMP_LED_BLINK) {
+                if (period_ms < 100U ||
+                    period_ms > 10000U ||
+                    period_ms % 20U != 0) {
+                    response->status = AMP_RESULT_BAD_PAYLOAD;
+                    break;
+                }
+            } else if (period_ms != 0) {
+                response->status = AMP_RESULT_BAD_PAYLOAD;
+                break;
+            }
+
+            command.period_ms = period_ms;
+        }
+
+        /*
+         * 先保留原请求。
+         * GPIO 尚未执行，不能缓存或返回成功响应。
+         */
+        control_request = *request;
+
+        if (control_submit(&command) != 0) {
+            response->status = AMP_RESULT_BUSY;
+            break;
+        }
+
+        control_pending = 1;
+        return;
+    }
+
     default:
         response->status = AMP_RESULT_UNSUPPORTED;
         break;
@@ -201,6 +296,58 @@ static void handle_request(const AMPMessage *request,
         ++rejected_requests;
 
     cache_result(request, response);
+}
+
+static int collect_control_result(AMPMessage *response)
+{
+    ControlResult result;
+    int received;
+
+    received = control_receive(&result);
+    configASSERT(received >= 0);
+
+    if (received == 0)
+        return 0;
+
+    configASSERT(result.session == control_request.session);
+    configASSERT(result.sequence == control_request.sequence);
+
+    response_begin(&control_request, response);
+
+    switch (result.status) {
+    case CONTROL_OK:
+        response->status = AMP_RESULT_OK;
+        response->payload_length = 12U;
+
+        put_u32(response->payload + 0, result.mode);
+        put_u32(response->payload + 4, result.output);
+        put_u32(response->payload + 8, result.period_ms);
+        break;
+
+    case CONTROL_BAD_ARGUMENT:
+        response->status = AMP_RESULT_BAD_PAYLOAD;
+        break;
+
+    case CONTROL_HW_ERROR:
+        response->status = AMP_RESULT_HW_ERROR;
+        break;
+
+    default:
+        response->status = AMP_RESULT_INTERNAL;
+        break;
+    }
+
+    if (response->status != AMP_RESULT_OK)
+        ++rejected_requests;
+
+    /*
+     * 缓存实际执行结果。
+     * 同一请求重发时直接返回缓存，不再次操作 GPIO。
+     */
+    cache_result(&control_request, response);
+    control_pending = 0;
+
+    return 1;
 }
 
 void amp_ipc_init(void)
@@ -220,6 +367,7 @@ void amp_ipc_init(void)
     rejected_requests = 0;
     heartbeat_sequence = 0;
     have_cached_response = 0;
+    control_pending = 0;
 
     result = amp_transport_init(transport);
     configASSERT(result == AMP_TRANSPORT_OK);
@@ -227,16 +375,13 @@ void amp_ipc_init(void)
 
 void amp_ipc_task(void *argument)
 {
-    /*
-     * 使用静态缓冲区，降低 IpcTask 的栈占用。
-     * 本任务只能创建一个实例。
-     */
     static AMPMessage request;
     static AMPMessage pending_response;
     static AMPMessage heartbeat;
 
     int response_pending = 0;
     TickType_t last_heartbeat;
+
     const TickType_t poll_period = pdMS_TO_TICKS(10);
     const TickType_t heartbeat_period = pdMS_TO_TICKS(1000);
 
@@ -252,10 +397,19 @@ void amp_ipc_task(void *argument)
     for (;;) {
         int result;
         TickType_t now;
+        monitor_beat(MONITOR_IPC);
+        /*
+         * 控制任务完成后，才产生最终响应。
+         * IpcTask 不阻塞等待队列。
+         */
+        if (control_pending) {
+            if (collect_control_result(&pending_response))
+                response_pending = 1;
+        }
 
         /*
-         * 已执行的命令必须保留响应，直到成功发布。
-         * 返回通道被占用时，不继续执行下一条请求。
+         * 保留响应直到成功写入返回通道。
+         * Linux 未消费旧消息时，不覆盖共享槽。
          */
         if (response_pending) {
             result = amp_channel_send(
@@ -269,7 +423,11 @@ void amp_ipc_task(void *argument)
             }
         }
 
-        if (!response_pending) {
+        /*
+         * 控制命令尚未完成或响应尚未发布时，
+         * 不处理下一条请求，也不切换会话。
+         */
+        if (!response_pending && !control_pending) {
             result = amp_channel_receive(
                 &transport->linux_to_rtos,
                 &request);
@@ -277,17 +435,20 @@ void amp_ipc_task(void *argument)
             if (result == AMP_TRANSPORT_OK) {
                 if (request.type == AMP_MSG_REQUEST) {
                     ++received_requests;
-                    handle_request(&request, &pending_response);
-                    response_pending = 1;
+
+                    handle_request(&request,
+                                   &pending_response);
+
+                    /*
+                     * 普通命令立即产生响应。
+                     * LED 命令等待 ControlTask 的执行结果。
+                     */
+                    if (!control_pending)
+                        response_pending = 1;
                 } else {
                     ++bad_frames;
                 }
             } else if (result != AMP_TRANSPORT_EMPTY) {
-                /*
-                 * CRC/格式错误时，不相信 session 和 sequence，
-                 * 因而不按损坏头部发送响应。
-                 * 发送端通过超时发现失败。
-                 */
                 ++bad_frames;
             }
         }
@@ -295,8 +456,8 @@ void amp_ipc_task(void *argument)
         now = xTaskGetTickCount();
 
         /*
-         * 响应优先于心跳。
-         * 通道忙时心跳可以合并，下一轮重新生成最新状态。
+         * 心跳仍可在等待 ControlTask 时发送。
+         * 已有最终响应时，优先发送响应。
          */
         if (!response_pending &&
             active_session != 0 &&
@@ -307,10 +468,12 @@ void amp_ipc_task(void *argument)
             heartbeat.sequence = heartbeat_sequence + 1U;
             heartbeat.opcode = AMP_OP_GET_STATUS;
             heartbeat.status = AMP_RESULT_OK;
+
             fill_status(&heartbeat);
 
             result = amp_channel_send(
-                &transport->rtos_to_linux, &heartbeat);
+                &transport->rtos_to_linux,
+                &heartbeat);
 
             if (result == AMP_TRANSPORT_OK) {
                 heartbeat_sequence = heartbeat.sequence;

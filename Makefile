@@ -62,6 +62,9 @@ C_SRCS := \
 	$(FREERTOS_DIR)/portable/MemMang/heap_4.c \
 	common/amp_message.c \
 	common/amp_transport.c \
+	rtos/board_led.c \
+	rtos/monitor_task.c \
+	rtos/control_task.c \
 	$(PORT_DIR)/port.c
 
 ASM_SRCS := \

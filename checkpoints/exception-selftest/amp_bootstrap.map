@@ -1,0 +1,84 @@
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+RAM              0x0000000020000000 0x0000000001000000 xrw
+*default*        0x0000000000000000 0xffffffffffffffff
+
+Linker script and memory map
+
+                0x0000000020000000                . = ORIGIN (RAM)
+
+.text           0x0000000020000000     0x10c8
+ *(.text.boot)
+ .text.boot     0x0000000020000000       0x98 build/startup.o
+                0x0000000020000000                _start
+                0x0000000020000800                . = ALIGN (0x800)
+ *fill*         0x0000000020000098      0x768 
+ *(.text.vectors)
+ .text.vectors  0x0000000020000800      0x870 build/vector.o
+                0x0000000020000800                amp_vectors
+ *(.text*)
+ .text          0x0000000020001070        0x0 build/startup.o
+ .text          0x0000000020001070        0x0 build/vector.o
+ .text          0x0000000020001070       0x58 build/main.o
+                0x0000000020001070                amp_main
+
+.iplt           0x00000000200010c8        0x0
+ .iplt          0x00000000200010c8        0x0 build/startup.o
+
+.rela.dyn       0x00000000200010c8        0x0
+ .rela.iplt     0x00000000200010c8        0x0 build/startup.o
+ .rela.text.boot
+                0x00000000200010c8        0x0 build/startup.o
+
+.rodata
+ *(.rodata*)
+
+.eh_frame       0x00000000200010c8       0x28
+ .eh_frame      0x00000000200010c8       0x28 build/main.o
+
+.eh_frame_hdr   0x00000000200010f0       0x14
+ .eh_frame_hdr  0x00000000200010f0       0x14 build/main.o
+                0x00000000200010f0                __GNU_EH_FRAME_HDR
+
+.data           0x0000000020001104        0x0
+ *(.data*)
+ .data          0x0000000020001104        0x0 build/startup.o
+ .data          0x0000000020001104        0x0 build/vector.o
+ .data          0x0000000020001104        0x0 build/main.o
+
+.igot.plt       0x0000000020001108        0x0
+ .igot.plt      0x0000000020001108        0x0 build/startup.o
+
+.bss            0x0000000020001104        0xc
+                0x0000000020001110                . = ALIGN (0x10)
+ *fill*         0x0000000020001104        0xc 
+                0x0000000020001110                __bss_start__ = .
+ *(.bss*)
+ .bss           0x0000000020001110        0x0 build/startup.o
+ .bss           0x0000000020001110        0x0 build/vector.o
+ .bss           0x0000000020001110        0x0 build/main.o
+ *(COMMON)
+                0x0000000020001110                . = ALIGN (0x10)
+                0x0000000020001110                __bss_end__ = .
+                0x0000000020002000                . = ALIGN (0x1000)
+                0x0000000020002000                __image_end__ = .
+                0x0000000020fe0000                __boot_flag = ((ORIGIN (RAM) + LENGTH (RAM)) - 0x20000)
+                0x0000000020ff0000                __stack_bottom = ((ORIGIN (RAM) + LENGTH (RAM)) - 0x10000)
+                0x0000000021000000                __stack_top = (ORIGIN (RAM) + LENGTH (RAM))
+                0x0000000000000001                ASSERT ((__image_end__ < __boot_flag), AMP image is too large)
+LOAD build/startup.o
+LOAD build/vector.o
+LOAD build/main.o
+OUTPUT(build/amp_bootstrap.elf elf64-littleaarch64)
+LOAD linker stubs
+
+.comment        0x0000000000000000       0x5d
+ .comment       0x0000000000000000       0x5d build/main.o
+                                         0x5e (size before relaxing)
+
+.note.GNU-stack
+                0x0000000000000000        0x0
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/main.o

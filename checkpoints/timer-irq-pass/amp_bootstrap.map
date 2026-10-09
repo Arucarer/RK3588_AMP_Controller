@@ -1,0 +1,95 @@
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+RAM              0x0000000020000000 0x0000000001000000 xrw
+*default*        0x0000000000000000 0xffffffffffffffff
+
+Linker script and memory map
+
+                0x0000000020000000                . = ORIGIN (RAM)
+
+.text           0x0000000020000000     0x1574
+ *(.text.boot)
+ .text.boot     0x0000000020000000       0x98 build/startup.o
+                0x0000000020000000                _start
+                0x0000000020000800                . = ALIGN (0x800)
+ *fill*         0x0000000020000098      0x768 
+ *(.text.vectors)
+ .text.vectors  0x0000000020000800      0x920 build/vector.o
+                0x0000000020000800                amp_vectors
+ *(.text*)
+ .text          0x0000000020001120        0x0 build/startup.o
+ .text          0x0000000020001120        0x0 build/vector.o
+ .text          0x0000000020001120       0x60 build/main.o
+                0x0000000020001120                amp_main
+ .text          0x0000000020001180      0x3f4 build/irq_timer.o
+                0x00000000200011b0                amp_timer_test
+                0x00000000200014c0                amp_irq_handler
+
+.iplt           0x0000000020001574        0x0
+ .iplt          0x0000000020001574        0x0 build/startup.o
+
+.rela.dyn       0x0000000020001578        0x0
+ .rela.iplt     0x0000000020001578        0x0 build/startup.o
+ .rela.text.boot
+                0x0000000020001578        0x0 build/startup.o
+
+.rodata
+ *(.rodata*)
+
+.eh_frame       0x0000000020001578       0x74
+ .eh_frame      0x0000000020001578       0x30 build/main.o
+ .eh_frame      0x00000000200015a8       0x44 build/irq_timer.o
+                                         0x58 (size before relaxing)
+
+.eh_frame_hdr   0x00000000200015ec       0x2c
+ .eh_frame_hdr  0x00000000200015ec       0x2c build/main.o
+                0x00000000200015ec                __GNU_EH_FRAME_HDR
+
+.data           0x0000000020001618        0x0
+ *(.data*)
+ .data          0x0000000020001618        0x0 build/startup.o
+ .data          0x0000000020001618        0x0 build/vector.o
+ .data          0x0000000020001618        0x0 build/main.o
+ .data          0x0000000020001618        0x0 build/irq_timer.o
+
+.igot.plt       0x0000000020001618        0x0
+ .igot.plt      0x0000000020001618        0x0 build/startup.o
+
+.bss            0x0000000020001618       0x18
+                0x0000000020001620                . = ALIGN (0x10)
+ *fill*         0x0000000020001618        0x8 
+                0x0000000020001620                __bss_start__ = .
+ *(.bss*)
+ .bss           0x0000000020001620        0x0 build/startup.o
+ .bss           0x0000000020001620        0x0 build/vector.o
+ .bss           0x0000000020001620        0x0 build/main.o
+ .bss           0x0000000020001620       0x10 build/irq_timer.o
+ *(COMMON)
+                0x0000000020001630                . = ALIGN (0x10)
+                0x0000000020001630                __bss_end__ = .
+                0x0000000020002000                . = ALIGN (0x1000)
+                0x0000000020002000                __image_end__ = .
+                0x0000000020fe0000                __boot_flag = ((ORIGIN (RAM) + LENGTH (RAM)) - 0x20000)
+                0x0000000020ff0000                __stack_bottom = ((ORIGIN (RAM) + LENGTH (RAM)) - 0x10000)
+                0x0000000021000000                __stack_top = (ORIGIN (RAM) + LENGTH (RAM))
+                0x0000000000000001                ASSERT ((__image_end__ < __boot_flag), AMP image is too large)
+LOAD build/startup.o
+LOAD build/vector.o
+LOAD build/main.o
+LOAD build/irq_timer.o
+OUTPUT(build/amp_bootstrap.elf elf64-littleaarch64)
+LOAD linker stubs
+
+.comment        0x0000000000000000       0x5d
+ .comment       0x0000000000000000       0x5d build/main.o
+                                         0x5e (size before relaxing)
+ .comment       0x000000000000005d       0x5e build/irq_timer.o
+
+.note.GNU-stack
+                0x0000000000000000        0x0
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/main.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/irq_timer.o

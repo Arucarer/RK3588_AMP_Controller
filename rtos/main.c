@@ -4,6 +4,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "irq_timer.h"
+#include "control_task.h"
+#include "monitor_task.h"
 
 #define AMP_BOOT_MAGIC      0xA55A55A55AA55AA5ULL
 #define AMP_BOOT_FLAG_ADDR  0x20FE0000ULL
@@ -175,8 +177,16 @@ void amp_main(void)
     rtos_info->stage = 2;
     barrier();
 
+    if (monitor_init() != 0)
+        rtos_stop(4);
+        
     amp_ipc_init();
-
+    /*
+    * 在调度器启动前创建控制任务。
+    * 实际 GPIO 初始化在 ControlTask 运行时执行。
+    */
+    if (control_init() != 0)
+        rtos_stop(4);
     /*
      * Stack depth is in StackType_t units:
      * 512 entries = 4096 bytes on this AArch64 Port.
