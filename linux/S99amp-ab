@@ -1,0 +1,10 @@
+#!/bin/sh
+# Install only with the coordinated rootfs deployment, not on the live board.
+case "$1" in
+    start)
+        mkdir -p /var/log/amp
+        python3 /opt/amp/amp_ab_boot_health.py >>/var/log/amp/boot-health.log 2>&1 &
+        ;;
+    stop) : ;; # Do not cancel trial health/confirmation during normal shutdown.
+    *) echo "usage: $0 start|stop" >&2; exit 1 ;;
+esac
