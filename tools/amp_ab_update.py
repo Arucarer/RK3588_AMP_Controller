@@ -85,6 +85,9 @@ def select(fd):
 
 def stage_record(state, target):
     generation, confirmed, pending, tries, trial = state
+    require(target in (0, 1), "目标槽必须为 A 或 B")
+    require(confirmed in (0, 1), "已确认槽非法")
+    require(generation > 0, "代次非法")
     require(pending == NONE and trial == NONE and tries == 0,
             "已有升级事务")
     require(target != confirmed, "禁止升级已确认槽")
@@ -238,6 +241,104 @@ def install_image(source, part, item):
     finally:
         os.close(fd)
 
+class PendingCommitUncertain(RuntimeError):
+    """元数据写入已开始；失败不代表新记录一定无效。"""
+
+
+def verify_snapshot(work, pubkey):
+    # 必须先完成认证和内容验收，之后才能进入任何块设备写入。
+    ota_release.verify(work, pubkey)
+    manifest = json.loads((work / "release.json").read_text())
+    ota_release.verify_images(work, manifest)
+    return manifest
+
+
+def require_metadata_unchanged(fd, baseline):
+    require(select(fd) == baseline,
+            "元数据发生变化；停止升级")
+
+
+def require_boot_unchanged(identity):
+    require(boot_identity() == identity,
+            "启动身份发生变化；停止升级")
+
+
+def commit_pending(fd, baseline, record):
+    selected, state, records = baseline
+    next_state = decode(record)
+
+    require(next_state[0] == state[0] + 1,
+            "pending 代次不连续")
+    require(next_state[1] == state[1],
+            "pending 不得改变已确认槽")
+    require(state[2:] == (NONE, 0, NONE),
+            "当前已有升级事务")
+    require(next_state[2] in (0, 1)
+            and next_state[2] != state[1]
+            and next_state[3:] == (3, NONE),
+            "pending 状态非法")
+
+    require_metadata_unchanged(fd, baseline)
+    other = selected ^ 1
+
+    try:
+        # 从第一次写入开始，任何错误都按“结果不确定”处理。
+        write_all(fd, record, other * META_BYTES)
+        os.fsync(fd)
+        fcntl.ioctl(fd, 0x1261)  # BLKFLSBUF
+
+        require(os.pread(fd, META_BYTES, other * META_BYTES) == record,
+                "pending 完整记录读回不一致")
+
+        final_selected, final_state, final_records = select(fd)
+        require(final_selected == other and final_state == next_state,
+                "pending 选中状态不一致")
+        require(final_records[selected] == records[selected],
+                "旧有效副本发生变化")
+    except Exception as exc:
+        raise PendingCommitUncertain(
+            "pending 提交结果不确定；禁止自动重试或重启，"
+            "必须重新读取两份元数据"
+        ) from exc
+
+
+def execute_update(work, manifest, targets, meta, baseline, identity):
+    running, boot_generation, trial = identity
+    selected, state, records = baseline
+
+    require(running in (0, 1), "运行槽非法")
+    require(state[1] == running, "运行槽不是已确认槽")
+    require(state[2:] == (NONE, 0, NONE),
+            "存在未结束的升级事务")
+
+    target = 1 - running
+    suffix = "_b" if target else ""
+    require(set(targets) == {"boot", "amp", "rootfs"},
+            "目标镜像集合错误")
+
+    for name, part in targets.items():
+        require(part["name"] == name + suffix,
+                "目标分区不是非活动槽：" + name)
+        require(0 < manifest["images"][name]["size"] <= part["size"],
+                "镜像超过目标容量：" + name)
+
+    # 提前发现代次溢出，不能写完镜像才发现无法 stage。
+    record = stage_record(state, target)
+    devices = {part["dev"] for part in targets.values()}
+    require(len(devices) == 3, "目标分区重复")
+
+    for name in ("boot", "amp", "rootfs"):
+        require_boot_unchanged(identity)
+        require_metadata_unchanged(meta, baseline)
+        require_unused(devices)
+        install_image(work / (name + ".img"),
+                      targets[name], manifest["images"][name])
+
+    # install_image 返回表示该镜像已刷新并完成读回哈希校验。
+    require_boot_unchanged(identity)
+    require_unused(devices)
+    commit_pending(meta, baseline, record)
+    return target, decode(record)[0]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -276,10 +377,10 @@ def main():
                         "发布文件非法：" + name)
                 shutil.copyfile(source, work / name)
 
-            ota_release.verify(work, pubkey)
-            manifest = json.loads((work / "release.json").read_text())
+            manifest = verify_snapshot(work, pubkey)
 
-            running, boot_generation, trial = boot_identity()
+            identity = boot_identity()
+            running, boot_generation, trial = identity
             names = ("uboot", "misc", "boot", "recovery", "amp",
                      "rootfs", "oem", "userdata",
                      "boot_b", "amp_b", "rootfs_b", "abmeta")
@@ -318,34 +419,18 @@ def main():
                             name + " 镜像超过目标容量")
                     print("TARGET:", name, "->", part["path"])
 
-                new_record = stage_record(state, target)
+                stage_record(state, target)
                 if not args.commit:
                     print("PLAN OK: target=" + ("B" if target else "A"))
                     print("未写镜像、未写元数据、未重启")
                     return
 
-                for name in ("boot", "amp", "rootfs"):
-                    require_unused({p["dev"] for p in targets.values()})
-                    install_image(work / (name + ".img"),
-                                  targets[name], manifest["images"][name])
-
-                # 写镜像期间不得有其他元数据变更。
-                now_selected, now_state, now_records = select(meta)
-                require((now_selected, now_state, now_records) ==
-                        (selected, state, records), "元数据发生变化")
-
-                other = selected ^ 1
-                write_all(meta, new_record, other * META_BYTES)
-                os.fsync(meta)
-                fcntl.ioctl(meta, 0x1261)
-                require(os.pread(meta, META_BYTES, other * META_BYTES) ==
-                        new_record, "pending 元数据读回失败")
-                final_selected, final_state, _ = select(meta)
-                require(final_selected == other
-                        and final_state == decode(new_record),
-                        "pending 元数据选择失败")
+                target, staged_generation = execute_update(
+                    work, manifest, targets, meta,
+                    (selected, state, records), identity
+                )
                 print("STAGED: slot=" + ("B" if target else "A")
-                      + " tries=3 generation=" + str(generation + 1))
+                      + " tries=3 generation=" + str(staged_generation))
                 print("未自动重启")
             finally:
                 os.close(meta)
