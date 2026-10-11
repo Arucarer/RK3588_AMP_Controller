@@ -10,7 +10,7 @@ import time
 import urllib.request
 from amp_watchdog import BootWatchdog
 
-ACTIVATE = False
+ACTIVATE = True
 CONFIRM = '/opt/amp/bin/amp_ab_confirm'
 AMPCTL = '/opt/amp/bin/ampctl'
 BOOT_HEALTH_SECONDS = 45

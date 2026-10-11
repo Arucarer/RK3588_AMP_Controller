@@ -28,8 +28,15 @@ LIMITS = {
 }
 APPS = (
     "/opt/amp/bin/ampctl",
+    "/opt/amp/bin/amp_ab_confirm",
     "/opt/amp/amp_hmi.py",
     "/opt/amp/run-hmi.sh",
+    "/opt/amp/amp_ab_boot_health.py",
+    "/opt/amp/amp_watchdog.py",
+    "/opt/amp/update/amp_ab_update.py",
+    "/opt/amp/update/ota_release.py",
+    "/etc/init.d/S99amp-ab",
+    "/etc/amp/keys/release-public.pem",
 )
 EXPECTED_CPUS = {0x000, 0x100, 0x200, 0x400, 0x500, 0x600, 0x700}
 

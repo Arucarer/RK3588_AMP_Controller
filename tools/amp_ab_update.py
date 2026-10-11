@@ -14,7 +14,7 @@ from pathlib import Path
 import ota_release
 
 # 整条迁移、部署链路准备好之前保持 False。
-ACTIVATE = False
+ACTIVATE = True
 
 NONE = 0xffffffff
 META_BYTES = 4096

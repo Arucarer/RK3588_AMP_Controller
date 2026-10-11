@@ -18,8 +18,14 @@ class BootWatchdog:
             raise RuntimeError('watchdog0 is not DesignWare WDT')
         if (sys / 'device/of_node').resolve(strict=True).name != 'watchdog@feaf0000':
             raise RuntimeError('watchdog0 is not RK3588 WDT0')
-        if (sys / 'state').read_text().strip() != 'active':
-            raise RuntimeError('U-Boot running watchdog was not inherited')
+        # sysfs state does not represent WDOG_HW_RUNNING.
+        import subprocess
+        control = int(subprocess.check_output(
+            ['busybox', 'devmem', '0xFEAF0000', '32'],
+            text=True).strip(), 16)
+        remaining = int((sys / 'timeleft').read_text().strip())
+        if (control & 3) != 1 or remaining <= 0:
+            raise RuntimeError('inherited hardware watchdog is not running')
         if (sys / 'nowayout').read_text().strip() != '1':
             raise RuntimeError('watchdog nowayout is required')
         self.fd = os.open('/dev/watchdog0', os.O_WRONLY | os.O_CLOEXEC)
