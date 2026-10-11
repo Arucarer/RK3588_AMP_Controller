@@ -4,6 +4,9 @@
 #include "task.h"
 #include "shared_memory.h"
 #include "control_task.h"
+#include "bus_task.h"
+#include "drivers/amp_bus_handoff.h"
+#define AMP_OP_BUS_EXEC 0x30U
 #include "monitor_task.h"
 #include "../common/amp_message.h"
 #include "../common/amp_transport.h"
@@ -28,6 +31,8 @@ static AMPMessage cached_response;
 /* 已交给 ControlTask、尚未取回执行结果的请求。 */
 static int control_pending;
 static AMPMessage control_request;
+static int bus_pending;
+static AMPMessage bus_request;
 
 static uint32_t get_u32(const uint8_t *p)
 {
@@ -195,6 +200,115 @@ static void handle_request(const AMPMessage *request,
     }
 
     switch (request->opcode) {
+
+    case AMP_OP_BUS_EXEC:
+    {
+        AmpBusCommand command = {0};
+
+        /*
+         * Request, 20 bytes:
+         * +00 operation
+         * +04 CAN standard ID, otherwise zero
+         * +08 data length
+         * +12 data[8], unused bytes must be zero
+         */
+        if (request->payload_length != 20U) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        command.session = request->session;
+        command.sequence = request->sequence;
+        command.operation = get_u32(request->payload);
+        command.can_id = get_u32(request->payload + 4);
+        command.length = get_u32(request->payload + 8);
+
+        if (command.operation < AMP_BUS_OP_CAN_LOOPBACK ||
+            command.operation > AMP_BUS_OP_MODBUS_MOCK ||
+            command.length > 8U ||
+            (command.operation == AMP_BUS_OP_CAN_LOOPBACK &&
+             command.can_id > 0x7FFU) ||
+            (command.operation != AMP_BUS_OP_CAN_LOOPBACK &&
+             command.can_id != 0U) ||
+            (command.operation == AMP_BUS_OP_UART_LOOPBACK &&
+             command.length != 1U) ||
+            (command.operation == AMP_BUS_OP_MODBUS_MOCK &&
+             command.length != 8U)) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        for (i = 0; i < 8U; ++i)
+            command.data[i] = request->payload[12U + i];
+
+        for (i = command.length; i < 8U; ++i) {
+            if (command.data[i] != 0U)
+                break;
+        }
+        if (i != 8U) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        if (amp_bus_submit(&command) != 0) {
+            response->status = AMP_RESULT_BUSY;
+            break;
+        }
+
+        bus_request = *request;
+        bus_pending = 1;
+        return;
+    }
+    case AMP_OP_CAN_AUTHORIZE:
+    {
+        uint32_t channel, id, flags, length;
+        int valid_length;
+
+        if (request->payload_length != 80U) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        channel = get_u32(request->payload);
+        id = get_u32(request->payload + 4);
+        flags = get_u32(request->payload + 8);
+        length = get_u32(request->payload + 12);
+
+        valid_length = length <= 8U ||
+            length == 12U || length == 16U || length == 20U ||
+            length == 24U || length == 32U || length == 48U ||
+            length == 64U;
+
+        if (channel > 1U || flags > 7U ||
+            id > ((flags & 1U) ? 0x1fffffffU : 0x7ffU) ||
+            !valid_length ||
+            (!(flags & 2U) && length > 8U) ||
+            ((flags & 4U) && !(flags & 2U))) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        /* Canonical encoding: unused payload bytes must be zero. */
+        for (i = length; i < 64U; ++i) {
+            if (request->payload[16U + i] != 0U)
+                break;
+        }
+        if (i != 64U) {
+            response->status = AMP_RESULT_BAD_PAYLOAD;
+            break;
+        }
+
+        /*
+         * Linux owns CAN hardware.
+         * This response approves a request; it does not report CAN TX success.
+         * This bring-up policy accepts valid frames on logical channels 0/1.
+         */
+        response->payload_length = 80U;
+        for (i = 0; i < 80U; ++i)
+            response->payload[i] = request->payload[i];
+        break;
+    }
+
     case AMP_OP_HELLO:
         if (request->payload_length != 0)
             response->status = AMP_RESULT_BAD_PAYLOAD;
@@ -350,6 +464,50 @@ static int collect_control_result(AMPMessage *response)
     return 1;
 }
 
+
+static int collect_bus_result(AMPMessage *response)
+{
+    AmpBusResult result;
+    int received;
+    uint32_t i;
+
+    received = amp_bus_receive(&result);
+    configASSERT(received >= 0);
+    if (received == 0)
+        return 0;
+
+    configASSERT(result.session == bus_request.session);
+    configASSERT(result.sequence == bus_request.sequence);
+    configASSERT(result.length <= sizeof(result.data));
+
+    response_begin(&bus_request, response);
+
+    /*
+     * Envelope OK means a BusTask result was received.
+     * Actual operation status is signed int32 encoded at payload+4.
+     *
+     * Response, 36 bytes:
+     * operation, operation status, length, clock Hz,
+     * sample point permille, data[16].
+     */
+    response->payload_length = 36U;
+    put_u32(response->payload, result.operation);
+    put_u32(response->payload + 4, (uint32_t)result.status);
+    put_u32(response->payload + 8, result.length);
+    put_u32(response->payload + 12, result.clock_hz);
+    put_u32(response->payload + 16, result.sample_permille);
+
+    for (i = 0; i < 16U; ++i)
+        response->payload[20U + i] = result.data[i];
+
+    if (result.status != AMP_BUS_OK)
+        ++rejected_requests;
+
+    cache_result(&bus_request, response);
+    bus_pending = 0;
+    return 1;
+}
+
 void amp_ipc_init(void)
 {
     uint64_t sctlr;
@@ -368,6 +526,7 @@ void amp_ipc_init(void)
     heartbeat_sequence = 0;
     have_cached_response = 0;
     control_pending = 0;
+    bus_pending = 0;
 
     result = amp_transport_init(transport);
     configASSERT(result == AMP_TRANSPORT_OK);
@@ -402,6 +561,11 @@ void amp_ipc_task(void *argument)
          * 控制任务完成后，才产生最终响应。
          * IpcTask 不阻塞等待队列。
          */
+        if (bus_pending) {
+            if (collect_bus_result(&pending_response))
+                response_pending = 1;
+        }
+
         if (control_pending) {
             if (collect_control_result(&pending_response))
                 response_pending = 1;
@@ -427,7 +591,7 @@ void amp_ipc_task(void *argument)
          * 控制命令尚未完成或响应尚未发布时，
          * 不处理下一条请求，也不切换会话。
          */
-        if (!response_pending && !control_pending) {
+        if (!response_pending && !control_pending && !bus_pending) {
             result = amp_channel_receive(
                 &transport->linux_to_rtos,
                 &request);
@@ -443,7 +607,7 @@ void amp_ipc_task(void *argument)
                      * 普通命令立即产生响应。
                      * LED 命令等待 ControlTask 的执行结果。
                      */
-                    if (!control_pending)
+                    if (!control_pending && !bus_pending)
                         response_pending = 1;
                 } else {
                     ++bad_frames;

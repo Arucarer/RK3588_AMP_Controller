@@ -2,6 +2,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "irq_timer.h"
+#include "drivers/amp_bus_irq.h"
+#include "drivers/amp_bus_handoff.h"
 
 #define GICR_BASE       0xFE680000ULL
 #define GICR_END        0xFE780000ULL
@@ -126,6 +128,8 @@ void amp_wait_for_start(void)
         (volatile uint64_t *)(uintptr_t)info;
 
     __asm__ volatile("msr daifset, #2" ::: "memory");
+    
+    amp_bus_handoff_clear();
 
     for (i = 0; i < sizeof(*info) / sizeof(uint64_t); i++)
         words[i] = 0;
@@ -302,6 +306,13 @@ void vApplicationIRQHandler(uint64_t iar)
         return;
     }
 
+    if (amp_bus_irq_dispatch(intid))
+        return;
+
+    /*
+     * Keep the existing fail-stop behavior for unassigned interrupts.
+     * Do not silently ignore a level-triggered interrupt.
+     */
     info->unexpected++;
     stop_test(8);
 }

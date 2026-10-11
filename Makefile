@@ -54,6 +54,11 @@ LDFLAGS := \
 C_SRCS := \
 	rtos/main.c \
 	rtos/irq_timer.c \
+	rtos/drivers/amp_bus_irq.c \
+	rtos/drivers/amp_bus_handoff.c \
+	rtos/drivers/can1.c \
+	rtos/drivers/uart3.c \
+	rtos/protocol/modbus_rtu.c \
 	rtos/shared_memory.c \
 	rtos/runtime.c \
 	$(FREERTOS_DIR)/tasks.c \
@@ -64,6 +69,9 @@ C_SRCS := \
 	common/amp_transport.c \
 	rtos/board_led.c \
 	rtos/monitor_task.c \
+	rtos/drivers/can_timing.c \
+	rtos/bus_task.c \
+	rtos/protocol/modbus_mock.c \
 	rtos/control_task.c \
 	$(PORT_DIR)/port.c
 

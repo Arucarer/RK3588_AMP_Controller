@@ -25,6 +25,7 @@
 /* LED control */
 #define AMP_OP_LED_SET          0x10U
 #define AMP_OP_LED_GET          0x11U
+#define AMP_OP_CAN_AUTHORIZE    0x20U
 
 #define AMP_LED_OFF             0U
 #define AMP_LED_ON              1U
