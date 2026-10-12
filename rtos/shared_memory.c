@@ -224,16 +224,19 @@ static void handle_request(const AMPMessage *request,
         command.length = get_u32(request->payload + 8);
 
         if (command.operation < AMP_BUS_OP_CAN_LOOPBACK ||
-            command.operation > AMP_BUS_OP_MODBUS_MOCK ||
+            command.operation > AMP_BUS_OP_CAN_RECOVER ||
             command.length > 8U ||
-            (command.operation == AMP_BUS_OP_CAN_LOOPBACK &&
-             command.can_id > 0x7FFU) ||
+            ((command.operation == AMP_BUS_OP_CAN_LOOPBACK ||
+              command.operation == AMP_BUS_OP_CAN_SEND) && command.can_id > 0x7FFU) ||
             (command.operation != AMP_BUS_OP_CAN_LOOPBACK &&
-             command.can_id != 0U) ||
+             command.operation != AMP_BUS_OP_CAN_SEND && command.can_id != 0U) ||
             (command.operation == AMP_BUS_OP_UART_LOOPBACK &&
              command.length != 1U) ||
-            (command.operation == AMP_BUS_OP_MODBUS_MOCK &&
-             command.length != 8U)) {
+            ((command.operation == AMP_BUS_OP_MODBUS_MOCK ||
+              command.operation == AMP_BUS_OP_MODBUS_RTU) &&
+             command.length != 8U) ||
+            (command.operation == AMP_BUS_OP_CAN_OPEN && command.length != 1U) ||
+            (command.operation >= AMP_BUS_OP_CAN_RECEIVE && command.length != 0U)) {
             response->status = AMP_RESULT_BAD_PAYLOAD;
             break;
         }

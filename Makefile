@@ -59,6 +59,7 @@ C_SRCS := \
 	rtos/drivers/can1.c \
 	rtos/drivers/uart3.c \
 	rtos/protocol/modbus_rtu.c \
+	rtos/protocol/modbus_master.c \
 	rtos/shared_memory.c \
 	rtos/runtime.c \
 	$(FREERTOS_DIR)/tasks.c \

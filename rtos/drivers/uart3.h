@@ -25,4 +25,9 @@ int amp_uart3_write(const uint8_t *data, size_t length,
 int amp_uart3_read(uint8_t *data, size_t length,
                    uint32_t timeout_us, size_t *done);
 
+/* Requires exclusive handoff; fail closed if GIC setup is incompatible. */
+int amp_uart3_rx_irq_enable(void);
+int amp_uart3_rx_poll(uint8_t *byte, uint64_t *observed_us);
+uint64_t amp_uart3_now_us(void);
+
 #endif

@@ -6,6 +6,12 @@
 #define AMP_BUS_OP_CAN_LOOPBACK  1U
 #define AMP_BUS_OP_UART_LOOPBACK 2U
 #define AMP_BUS_OP_MODBUS_MOCK   3U
+#define AMP_BUS_OP_MODBUS_RTU    4U
+#define AMP_BUS_OP_CAN_OPEN      5U
+#define AMP_BUS_OP_CAN_SEND      6U
+#define AMP_BUS_OP_CAN_RECEIVE   7U
+#define AMP_BUS_OP_CAN_STATUS    8U
+#define AMP_BUS_OP_CAN_RECOVER   9U
 
 typedef struct {
     uint64_t session;

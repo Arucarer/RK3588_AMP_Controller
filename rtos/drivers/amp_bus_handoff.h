@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #ifndef AMP_BUS_HW_ACTIVATE
-#define AMP_BUS_HW_ACTIVATE 0
+#define AMP_BUS_HW_ACTIVATE 1
 #endif
 
 #define AMP_BUS_HANDOFF_ADDR  UINT64_C(0x20FE1000)
