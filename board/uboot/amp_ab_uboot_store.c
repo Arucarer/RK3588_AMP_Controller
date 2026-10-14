@@ -3,63 +3,56 @@
  * 作用：将 A/B 元数据存储接口适配到 Rockchip U-Boot 块设备。
  */
 
-#include "amp_ab_uboot_store.h"
+#include "amp_ab_uboot_store.h" /* 引入 U-Boot 元数据存储适配接口 */
 
-#include <boot_rkimg.h>
-#include <string.h>
+#include <boot_rkimg.h> /* 引入 Rockchip 当前启动设备查询接口 */
+#include <string.h>     /* 引入内存复制、清零及字符串处理接口 */
 
 /* 读取 abmeta 分区中的单个逻辑块 */
-static int uboot_read_block(
-    void *ctx, uint64_t relative_lba,
-    void *buf, size_t bytes)
+static int uboot_read_block(void *ctx, uint64_t relative_lba, void *buf, size_t bytes)
 {
+    /* 1. 把元数据副本编号换算为块设备位置。 */
+    /* 2. 调用 U-Boot 块设备接口读写。 */
+    /* 3. 检查实际传输块数并返回结果。 */
+
     AmpAbUbootContext *io = (AmpAbUbootContext *)ctx;
 
-    if (!io || !io->dev || !buf ||
-        bytes != io->part.blksz ||
-        relative_lba >= io->part.size)
+    if (!io || !io->dev || !buf || bytes != io->part.blksz || relative_lba >= io->part.size)
         return -1;
 
-    if (blk_dread(
-            io->dev,
-            io->part.start + relative_lba,
-            1,
-            buf) != 1)
+    if (blk_dread(io->dev, io->part.start + relative_lba, 1, buf) != 1)
         return -1;
 
     return 0;
 }
 
 /* 写入 abmeta 分区中的单个逻辑块 */
-static int uboot_write_block(
-    void *ctx, uint64_t relative_lba,
-    const void *buf, size_t bytes)
+static int uboot_write_block(void *ctx, uint64_t relative_lba, const void *buf, size_t bytes)
 {
+    /* 1. 把元数据副本编号换算为块设备位置。 */
+    /* 2. 调用 U-Boot 块设备接口读写。 */
+    /* 3. 检查实际传输块数并返回结果。 */
+
     AmpAbUbootContext *io = (AmpAbUbootContext *)ctx;
 
-    if (!io || !io->dev || !buf ||
-        !io->write_enabled ||
-        bytes != io->part.blksz ||
+    if (!io || !io->dev || !buf || !io->write_enabled || bytes != io->part.blksz ||
         relative_lba >= io->part.size)
         return -1;
 
-    if (blk_dwrite(
-            io->dev,
-            io->part.start + relative_lba,
-            1,
-            buf) != 1)
+    if (blk_dwrite(io->dev, io->part.start + relative_lba, 1, buf) != 1)
         return -1;
 
     return 0;
 }
 
 /* 初始化 U-Boot A/B 元数据存储适配层 */
-int amp_ab_uboot_store_init(
-    AmpAbUbootContext *ctx,
-    AmpAbStore *store,
-    uint64_t copy_a_lba,
-    uint64_t copy_b_lba)
+int amp_ab_uboot_store_init(AmpAbUbootContext *ctx, AmpAbStore *store, uint64_t copy_a_lba,
+                            uint64_t copy_b_lba)
 {
+    /* 1. 核对块设备及元数据分区。 */
+    /* 2. 初始化存储回调、上下文和副本位置。 */
+    /* 3. 向启动流程提供统一元数据存储接口。 */
+
     struct blk_desc *dev;
 
     if (!ctx || !store)
@@ -74,16 +67,12 @@ int amp_ab_uboot_store_init(
         return -1;
 
     /* 根据名称查找 abmeta 分区 */
-    if (part_get_info_by_name(
-            dev, "abmeta", &ctx->part) < 0)
+    if (part_get_info_by_name(dev, "abmeta", &ctx->part) < 0)
         return -1;
 
     /* 验证逻辑块大小及双副本偏移 */
-    if (!ctx->part.blksz ||
-        ctx->part.blksz != dev->blksz ||
-        copy_a_lba == copy_b_lba ||
-        copy_a_lba >= ctx->part.size ||
-        copy_b_lba >= ctx->part.size)
+    if (!ctx->part.blksz || ctx->part.blksz != dev->blksz || copy_a_lba == copy_b_lba ||
+        copy_a_lba >= ctx->part.size || copy_b_lba >= ctx->part.size)
         return -1;
 
     ctx->dev = dev;

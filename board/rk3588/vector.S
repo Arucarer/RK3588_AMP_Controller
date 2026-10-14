@@ -10,6 +10,7 @@
 .type amp_vectors, %object
 .type _freertos_vector_table, %object
 
+/* 按异常来源排列向量槽；IRQ 转到 FreeRTOS，其余异常进入同步分流或停止路径。 */
 .macro VECTOR_SLOT number
     .balign 128
     .if \number == 0
@@ -26,6 +27,7 @@
     .endif
 .endm
 
+/* 1. 按 ARM64 要求生成 16 个对齐的异常向量入口。 */
 amp_vectors:
 _freertos_vector_table:
     VECTOR_SLOT 0
@@ -52,7 +54,7 @@ _freertos_vector_table:
 .size amp_vectors, . - amp_vectors
 .size _freertos_vector_table, . - _freertos_vector_table
 
-/* Route SVC to FreeRTOS; record other synchronous exceptions. */
+/* 2. 识别同步异常中的 SVC，转入 FreeRTOS；其他同步异常记录后停止。 */
 .macro SYNC_ENTRY name, number
     .balign 16
     .type \name, %function
@@ -81,12 +83,14 @@ SYNC_ENTRY amp_sync_spx, 4
 .balign 16
 .type amp_exception_stop, %function
 amp_exception_stop:
+    /* 1. 屏蔽异常并清除记录魔数，防止读取到半写入的诊断。 */
     msr     daifset, #0xf
 
     ldr     x1, =0x20FE0100
     str     xzr, [x1]
     dsb     sy
 
+    /* 2. 保存向量编号、异常级别及异常相关系统寄存器。 */
     str     x0, [x1, #8]
 
     mrs     x2, CurrentEL
@@ -110,11 +114,13 @@ amp_exception_stop:
 
     dsb     sy
 
+    /* 3. 在诊断数据可见后发布魔数，通知 Linux 记录完整。 */
     ldr     x2, =0x4558434550543031
     str     x2, [x1]
     dsb     sy
 
 .Lexception_wait:
+    /* 4. 永久等待，保留现场供外部读取。 */
     wfe
     b       .Lexception_wait
 

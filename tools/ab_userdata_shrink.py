@@ -12,69 +12,79 @@ from pathlib import Path
 import ab_migrate_preflight as preflight
 
 # 正式离线部署前保持关闭。
-ACTIVATE = False
+ACTIVATE = False  # ACTIVATE：允许执行实际操作的开关
 
-MARGIN_BYTES = 64 * 1024 * 1024
+MARGIN_BYTES = 64 * 1024 * 1024  # MARGIN_BYTES：文件系统缩容时保留的安全余量，单位字节
 
 
 def require(ok, message):
+    # 1. 按条件 not ok 选择处理分支。
     if not ok:
         raise RuntimeError(message)
 
 
 def filesystem_size(device):
+    # 1. 打开文件或设备，保存到 fd。
     fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC)
+    # 2. 执行本段操作，并在 finally 中清理资源。
     try:
         sb = os.pread(fd, 1024, 1024)
     finally:
         os.close(fd)
 
+    # 3. 调用 require。
     require(len(sb) == 1024, "超级块读取不完整")
-    require(struct.unpack_from("<H", sb, 56)[0] == 0xEF53,
-            "userdata 不是 ext 文件系统")
+    require(struct.unpack_from("<H", sb, 56)[0] == 0xEF53, "userdata 不是 ext 文件系统")
 
+    # 4. 调用 struct.unpack_from，保存到 log_block_size。
     log_block_size = struct.unpack_from("<I", sb, 24)[0]
     require(log_block_size <= 6, "文件系统块大小不支持")
     block_size = 1024 << log_block_size
 
+    # 5. 调用 struct.unpack_from，保存到 blocks。
     blocks = struct.unpack_from("<I", sb, 4)[0]
     incompat = struct.unpack_from("<I", sb, 96)[0]
 
+    # 6. 按条件 incompat & 0x80 选择处理分支。
     if incompat & 0x80:  # EXT4_FEATURE_INCOMPAT_64BIT
         blocks |= struct.unpack_from("<I", sb, 0x150)[0] << 32
 
+    # 7. 调用 require。
     require(blocks > 0, "文件系统块数错误")
+    # 8. 返回 blocks * block_size, block_size。
     return blocks * block_size, block_size
 
 
 def inspect(device, plan):
+    # 1. 调用 device.stat，保存到 info。
     info = device.stat()
     require(stat.S_ISBLK(info.st_mode), "必须指定整盘块设备")
 
-    sys = (
-        Path("/sys/dev/block") /
-        f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}"
-    ).resolve(strict=True)
+    # 2. 调用 (Path("/sys/dev/block") / f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}").resolve，保存到 sys。
+    sys = (Path("/sys/dev/block") / f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}").resolve(
+        strict=True
+    )
 
-    require(sys.name == "mmcblk0"
-            and not (sys / "partition").exists(),
-            "不是预期 eMMC 整盘")
-    require((sys / "device/type").read_text().strip() == "MMC",
-            "不是 eMMC")
-    require(int((sys / "size").read_text()) == plan["disk_sectors"],
-            "磁盘容量不匹配")
+    # 3. 调用 require。
+    require(sys.name == "mmcblk0" and not (sys / "partition").exists(), "不是预期 eMMC 整盘")
+    require((sys / "device/type").read_text().strip() == "MMC", "不是 eMMC")
+    require(int((sys / "size").read_text()) == plan["disk_sectors"], "磁盘容量不匹配")
 
+    # 4. 设置 devices，供后续逻辑使用。
     devices = {info.st_rdev}
+    # 5. 遍历 sys.iterdir()，逐项处理 child。
     for child in sys.iterdir():
         if (child / "partition").exists():
             major, minor = map(int, (child / "dev").read_text().split(":"))
             devices.add(os.makedev(major, minor))
-            require(not any((child / "holders").iterdir()),
-                    "分区存在设备映射")
+            require(not any((child / "holders").iterdir()), "分区存在设备映射")
 
+    # 6. 调用 preflight.ensure_unmounted。
     preflight.ensure_unmounted(devices)
 
+    # 7. 打开文件或设备，保存到 fd。
     fd = os.open(device, os.O_RDONLY | os.O_CLOEXEC)
+    # 8. 执行本段操作，并在 finally 中清理资源。
     try:
         sectors = plan["disk_sectors"]
         primary = preflight.read_gpt(fd, 1, sectors)
@@ -82,75 +92,76 @@ def inspect(device, plan):
     finally:
         os.close(fd)
 
-    require(primary["backup"] == sectors - 1
-            and secondary["backup"] == 1,
-            "GPT 指针不一致")
+    # 9. 调用 require。
+    require(primary["backup"] == sectors - 1 and secondary["backup"] == 1, "GPT 指针不一致")
+    # 10. 遍历 ("disk_guid", "first", "last", "entries")，逐项处理 key。
     for key in ("disk_guid", "first", "last", "entries"):
-        require(primary[key] == secondary[key],
-                "主备 GPT 不一致")
+        require(primary[key] == secondary[key], "主备 GPT 不一致")
 
+    # 11. 设置 expected，供后续逻辑使用。
     expected = plan["expected_current_partitions"]
-    require(len(primary["parts"]) == len(expected),
-            "当前分区数量已改变")
+    require(len(primary["parts"]) == len(expected), "当前分区数量已改变")
 
+    # 12. 遍历 zip(primary["parts"], expected)，逐项处理 current, wanted。
     for current, wanted in zip(primary["parts"], expected):
-        for key in ("number", "name", "start_sector",
-                    "end_sector", "sectors"):
-            require(current[key] == wanted[key],
-                    "旧布局不匹配：" + wanted["name"])
+        for key in ("number", "name", "start_sector", "end_sector", "sectors"):
+            require(current[key] == wanted[key], "旧布局不匹配：" + wanted["name"])
 
+    # 13. 构造文件系统路径，保存到 userdata。
     userdata = Path("/dev/mmcblk0p8")
     part_stat = userdata.stat()
     require(stat.S_ISBLK(part_stat.st_mode), "userdata 不是块设备")
 
+    # 14. 调用 ( Path("/sys/dev/block") / f"{os.major(part_stat.st_rdev)}:{os.minor(part_stat.st_rdev)}" ).resolve，保存到 part_sys。
     part_sys = (
-        Path("/sys/dev/block") /
-        f"{os.major(part_stat.st_rdev)}:{os.minor(part_stat.st_rdev)}"
+        Path("/sys/dev/block") / f"{os.major(part_stat.st_rdev)}:{os.minor(part_stat.st_rdev)}"
     ).resolve(strict=True)
     require(part_sys.parent == sys, "userdata 不属于目标磁盘")
-    require(int((part_sys / "partition").read_text()) == 8,
-            "userdata 分区编号错误")
-    require(int((part_sys / "start").read_text()) ==
-            expected[7]["start_sector"],
-            "userdata 起点错误")
-    require(int((part_sys / "size").read_text()) ==
-            expected[7]["sectors"],
-            "userdata 当前容量错误")
+    require(int((part_sys / "partition").read_text()) == 8, "userdata 分区编号错误")
+    require(
+        int((part_sys / "start").read_text()) == expected[7]["start_sector"], "userdata 起点错误"
+    )
+    require(int((part_sys / "size").read_text()) == expected[7]["sectors"], "userdata 当前容量错误")
 
+    # 15. 返回 userdata, primary, secondary, sys。
     return userdata, primary, secondary, sys
 
 
 def validate_backup(directory, primary, secondary, sys):
+    # 1. 解析 JSON 文本，保存到 report。
     report = json.loads((directory / "report.json").read_text())
-    require(report["emmc_cid"] ==
-            (sys / "device/cid").read_text().strip(),
-            "备份来自另一块 eMMC")
+    require(report["emmc_cid"] == (sys / "device/cid").read_text().strip(), "备份来自另一块 eMMC")
 
+    # 2. 加载本函数使用的依赖模块。
     import hashlib
+
+    # 3. 设置 expected，供后续逻辑使用。
     expected = {
         "primary-header.bin": primary["header"],
         "primary-entries.bin": primary["entries"],
         "backup-header.bin": secondary["header"],
         "backup-entries.bin": secondary["entries"],
     }
+    # 4. 遍历 expected.items()，逐项处理 name, live。
     for name, live in expected.items():
         data = (directory / name).read_bytes()
         require(data == live, "GPT 与备份不一致：" + name)
-        require(hashlib.sha256(data).hexdigest() ==
-                report["sha256"][name],
-                "GPT 备份摘要错误：" + name)
+        require(
+            hashlib.sha256(data).hexdigest() == report["sha256"][name], "GPT 备份摘要错误：" + name
+        )
 
 
 def run_check(device, repair):
     # 预演使用 -n；正式缩容前用 -p 自动修复安全问题。
     args = ["e2fsck", "-f", "-p" if repair else "-n", str(device)]
+    # 1. 执行子命令或封装的操作，保存到 result。
     result = subprocess.run(args)
     allowed = (0, 1) if repair else (0,)
-    require(result.returncode in allowed,
-            "文件系统检查未通过，退出码=" + str(result.returncode))
+    require(result.returncode in allowed, "文件系统检查未通过，退出码=" + str(result.returncode))
 
 
 def main():
+    # 1. 建立命令行参数解析器，保存到 parser。
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=Path, default=Path("/dev/mmcblk0"))
     parser.add_argument("--plan", type=Path, required=True)
@@ -158,48 +169,59 @@ def main():
     parser.add_argument("--commit", action="store_true")
     args = parser.parse_args()
 
+    # 2. 调用 require。
     require(os.geteuid() == 0, "需要 root")
     require(not args.commit or ACTIVATE, "缩容写入开关关闭")
-    require("AMP offline migration shell" in
-            Path("/etc/migration-init.sh").read_text(),
-            "必须在迁移恢复环境执行")
+    require(
+        "AMP offline migration shell" in Path("/etc/migration-init.sh").read_text(),
+        "必须在迁移恢复环境执行",
+    )
 
+    # 3. 遍历 ("e2fsck", "resize2fs")，逐项处理 tool。
     for tool in ("e2fsck", "resize2fs"):
         require(shutil.which(tool), "缺少工具：" + tool)
 
+    # 4. 解析 JSON 文本，保存到 plan。
     plan = json.loads(args.plan.read_text())
     require(plan["sector_bytes"] == 512, "计划扇区大小错误")
     require(plan["disk_sectors"] == 120832000, "计划磁盘容量错误")
 
+    # 5. 设置 old，供后续逻辑使用。
     old = plan["expected_current_partitions"][7]
     new = plan["proposed_partitions"][7]
-    require(old["name"] == new["name"] == "userdata"
-            and old["number"] == new["number"] == 8
-            and old["start_sector"] == new["start_sector"]
-            and 0 < new["sectors"] < old["sectors"],
-            "userdata 缩容计划错误")
+    require(
+        old["name"] == new["name"] == "userdata"
+        and old["number"] == new["number"] == 8
+        and old["start_sector"] == new["start_sector"]
+        and 0 < new["sectors"] < old["sectors"],
+        "userdata 缩容计划错误",
+    )
 
+    # 6. 调用 args.device.resolve，保存到 device。
     device = args.device.resolve(strict=True)
     userdata, primary, secondary, sys = inspect(device, plan)
     validate_backup(args.gpt_backup, primary, secondary, sys)
 
+    # 7. 调用 filesystem_size，保存到 current_bytes, block_size。
     current_bytes, block_size = filesystem_size(userdata)
     partition_bytes = new["sectors"] * 512
-    require(current_bytes <= old["sectors"] * 512,
-            "现有文件系统超出原分区")
+    require(current_bytes <= old["sectors"] * 512, "现有文件系统超出原分区")
     require(partition_bytes > MARGIN_BYTES, "目标分区过小")
 
     # 留出 64 MiB 余量，避免文件系统刚好顶到新分区边界。
     target_blocks = (partition_bytes - MARGIN_BYTES) // block_size
     target_bytes = target_blocks * block_size
 
+    # 8. 输出执行结果或诊断信息。
     print("userdata:", userdata, flush=True)
     print("current filesystem bytes:", current_bytes, flush=True)
     print("new partition bytes:", partition_bytes, flush=True)
     print("target filesystem bytes:", target_bytes, flush=True)
 
+    # 9. 调用 run_check。
     run_check(userdata, repair=False)
 
+    # 10. 按条件 not args.commit 选择处理分支。
     if not args.commit:
         print("PLAN OK: 未缩容、未修改 GPT")
         return
@@ -209,29 +231,30 @@ def main():
     validate_backup(args.gpt_backup, current_primary, current_secondary, sys)
     run_check(userdata, repair=True)
 
+    # 11. 调用 filesystem_size，保存到 current_bytes, block_size。
     current_bytes, block_size = filesystem_size(userdata)
+    # 12. 按条件 current_bytes > target_bytes 选择处理分支。
     if current_bytes > target_bytes:
         # 明确使用 KiB 单位，避免 resize2fs 默认单位歧义。
-        result = subprocess.run([
-            "resize2fs", str(userdata), str(target_bytes // 1024) + "K"
-        ])
-        require(result.returncode == 0,
-                "resize2fs 失败；不得继续修改 GPT")
+        result = subprocess.run(["resize2fs", str(userdata), str(target_bytes // 1024) + "K"])
+        require(result.returncode == 0, "resize2fs 失败；不得继续修改 GPT")
 
+    # 13. 调用 run_check。
     run_check(userdata, repair=False)
     final_bytes, _ = filesystem_size(userdata)
-    require(final_bytes <= target_bytes,
-            "缩容后文件系统仍超出目标")
+    require(final_bytes <= target_bytes, "缩容后文件系统仍超出目标")
 
+    # 14. 打开文件或设备，保存到 fd。
     fd = os.open(userdata, os.O_RDWR | os.O_CLOEXEC)
+    # 15. 执行本段操作，并在 finally 中清理资源。
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
 
+    # 16. 输出执行结果或诊断信息。
     print("SHRINK VERIFIED:", final_bytes)
-    print("GPT 尚未修改；不要直接启动正常系统，"
-          "应继续受控迁移或保留旧分区布局。")
+    print("GPT 尚未修改；不要直接启动正常系统，" "应继续受控迁移或保留旧分区布局。")
 
 
 if __name__ == "__main__":
@@ -239,6 +262,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         raise SystemExit(
-            "SHRINK STOPPED: " + str(exc)
+            "SHRINK STOPPED: "
+            + str(exc)
             + "\n不得继续写 GPT；若缩容已开始，应先重新离线检查文件系统。"
         )

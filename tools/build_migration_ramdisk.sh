@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-sdk="$HOME/rk3588_linux_sdk"
-project="$HOME/rk3588_projects/RK3588_AMP_Controller"
-source_root="$sdk/buildroot/output/rockchip_rk3588_recovery/target"
-output="$project/build/migration"
+sdk="$HOME/rk3588_linux_sdk"  # RK3588 SDK 根目录
+project="$HOME/rk3588_projects/RK3588_AMP_Controller"  # AMP 项目根目录
+source_root="$sdk/buildroot/output/rockchip_rk3588_recovery/target"  # 迁移镜像使用的 recovery 根文件系统
+output="$project/build/migration"  # 迁移镜像输出目录
 
+# 1. 核对主机工具及 recovery 运行环境。
 for tool in python3 cpio gzip; do
     command -v "$tool" >/dev/null
 done
@@ -13,7 +14,7 @@ done
 test -x "$source_root/bin/busybox"
 test -x "$source_root/usr/bin/python3"
 
-modules=(
+modules=(  # 要打包到迁移环境中的 Python 模块
     ab_migrate_preflight.py
     ab_gpt_prepare.py
     ab_gpt_apply.py
@@ -21,7 +22,7 @@ modules=(
     ab_migrate_device.py
 )
 
-# 打包前检查源码语法、写入开关和布局。
+# 2. 打包前检查源码语法、写入开关和布局。
 python3 - "$project" <<'PY'
 import ast
 import json
@@ -70,10 +71,11 @@ assert [p["name"] for p in plan["proposed_partitions"]] == [
 print("PASS: 模块语法、布局及两个 ACTIVATE=False")
 PY
 
+# 3. 创建临时目录并复制运行环境及迁移模块。
 mkdir -p "$output"
-stage=$(mktemp -d "$output/root.XXXXXX")
-ramdisk="${stage}.cpio.gz"
-fit="${stage}.fit.img"
+stage=$(mktemp -d "$output/root.XXXXXX")  # 本次打包的临时根文件系统目录
+ramdisk="${stage}.cpio.gz"  # 压缩后的 cpio 镜像路径
+fit="${stage}.fit.img"  # 最终 FIT 镜像路径
 
 cp -a "$source_root/." "$stage/"
 install -d "$stage/opt/amp-migration"
@@ -86,7 +88,7 @@ done
 install -m 644 "$project/docs/ab-layout-draft-v1.json" \
     "$stage/opt/amp-migration/layout.json"
 
-# 独立 init，不运行普通 recovery 的 rcS 和自动更新服务。
+# 4. 生成独立 init，不运行普通 recovery 的 rcS 和自动更新服务。
 cat > "$stage/init" <<'EOF'
 #!/bin/sh
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin

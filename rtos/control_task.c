@@ -1,35 +1,40 @@
-#include <stdint.h>
+#include <stdint.h> /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
 
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
-#include "monitor_task.h"
-#include "board_led.h"
-#include "control_task.h"
+#include "FreeRTOS.h"     /* 引入 FreeRTOS 内核类型、配置及基础接口 */
+#include "task.h"         /* 引入 FreeRTOS 任务、延时及调度接口 */
+#include "queue.h"        /* 引入 FreeRTOS 队列接口 */
+#include "monitor_task.h" /* 引入任务心跳、故障位及健康快照接口 */
+#include "board_led.h"    /* 引入板载 LED 驱动接口 */
+#include "control_task.h" /* 引入 LED 控制命令、结果及任务接口 */
 
-static QueueHandle_t command_queue;
-static QueueHandle_t result_queue;
+static QueueHandle_t
+    command_queue; /* command_queue：待执行命令队列，由提交接口写入、工作任务读取 */
+static QueueHandle_t result_queue; /* result_queue：已完成结果队列，由工作任务写入、IPC 接口读取 */
 
 /* 只由调用接口的 IpcTask 使用。 */
-static int command_in_flight;
+static int command_in_flight; /* command_in_flight：IPC 已提交但尚未取回结果的命令标志 */
 
 /* 只由 ControlTask 使用。 */
-static uint32_t led_mode;
-static uint32_t led_output;
-static uint32_t blink_period_ms;
+static uint32_t led_mode;        /* led_mode：当前 LED 工作模式 */
+static uint32_t led_output;      /* led_output：当前 LED 输出状态 */
+static uint32_t blink_period_ms; /* blink_period_ms：LED 完整闪烁周期，单位 ms */
 
-static TickType_t half_period;
-static TickType_t last_edge;
-static int hardware_ok;
+static TickType_t half_period; /* half_period：LED 两次翻转之间的 Tick 数 */
+static TickType_t last_edge;   /* last_edge：LED 上一次翻转的 Tick 时间 */
+static int hardware_ok;        /* hardware_ok：LED 硬件初始化和操作是否正常 */
 
-static void execute_command(const ControlCommand *command,
-                            ControlResult *result)
+static void execute_command(const ControlCommand *command, ControlResult *result)
 {
+    /* 1. 继承请求的会话和序号。 */
+    /* 2. 校验 LED 操作及周期参数并执行硬件操作。 */
+    /* 3. 更新 LED 状态，将状态码和当前模式写入结果。 */
+
     uint32_t status = CONTROL_OK;
 
     result->session = command->session;
     result->sequence = command->sequence;
 
+    //检查LED是否正常
     if (!hardware_ok) {
         status = CONTROL_HW_ERROR;
     } else {
@@ -41,8 +46,7 @@ static void execute_command(const ControlCommand *command,
                 break;
             }
 
-            if (board_led_set(
-                    command->operation == CONTROL_LED_ON) != 0) {
+            if (board_led_set(command->operation == CONTROL_LED_ON) != 0) {
                 hardware_ok = 0;
                 status = CONTROL_HW_ERROR;
                 break;
@@ -59,8 +63,7 @@ static void execute_command(const ControlCommand *command,
              * 且为 20 ms 的整数倍。
              * 当前 100 Hz Tick 下，半周期可以精确表示。
              */
-            if (command->period_ms < 100U ||
-                command->period_ms > 10000U ||
+            if (command->period_ms < 100U || command->period_ms > 10000U ||
                 command->period_ms % 20U != 0) {
                 status = CONTROL_BAD_ARGUMENT;
                 break;
@@ -101,6 +104,10 @@ static void execute_command(const ControlCommand *command,
 
 static void control_task(void *argument)
 {
+    /* 1. 初始化 LED 状态及硬件。 */
+    /* 2. 循环接收命令，同时按半周期维护闪烁输出。 */
+    /* 3. 上报心跳和硬件故障，将命令结果放入返回队列。 */
+
     ControlCommand command;
     ControlResult result;
     const TickType_t idle_wait = pdMS_TO_TICKS(100);
@@ -149,8 +156,7 @@ static void control_task(void *argument)
                 now = xTaskGetTickCount();
                 elapsed = now - last_edge;
 
-                wait_ticks = elapsed >= half_period ?
-                             0 : half_period - elapsed;
+                wait_ticks = elapsed >= half_period ? 0 : half_period - elapsed;
             }
         }
         /*
@@ -163,53 +169,40 @@ static void control_task(void *argument)
         if (!hardware_ok)
             monitor_report_led_fault();
 
-        /*
-         * 等待期间可被新命令唤醒，
-         * OFF/ON 命令不必等到一个闪烁周期结束。
-         */
-        if (xQueueReceive(command_queue,
-                          &command,
-                          wait_ticks) == pdPASS) {
+
+        if (xQueueReceive(command_queue, &command, wait_ticks) == pdPASS) {
             execute_command(&command, &result);
             if (!hardware_ok)
                 monitor_report_led_fault();
-
-            /*
-             * 单请求约束保证这里有一个空结果槽。
-             * 不等待 Linux 读取响应，不阻塞后续闪烁。
-             */
-            configASSERT(
-                xQueueSend(result_queue, &result, 0) == pdPASS);
+            configASSERT(xQueueSend(result_queue, &result, 0) == pdPASS);
         }
     }
 }
 
 int control_init(void)
 {
-    BaseType_t created;
+    /* 1. 创建命令队列和结果队列并检查分配结果。 */
+    /* 2. 创建工作任务，交由 FreeRTOS 调度。 */
 
+    BaseType_t created;
+    //检查是否初始化
     if (command_queue != NULL || result_queue != NULL)
         return -1;
-
+    //创建命令队列
     command_queue = xQueueCreate(1, sizeof(ControlCommand));
     if (command_queue == NULL)
         return -1;
-
+    //创建结果队列
     result_queue = xQueueCreate(1, sizeof(ControlResult));
     if (result_queue == NULL) {
         vQueueDelete(command_queue);
         command_queue = NULL;
         return -1;
     }
-
+    //初始化命令状态
     command_in_flight = 0;
-
-    created = xTaskCreate(control_task,
-                          "Control",
-                          configMINIMAL_STACK_SIZE,
-                          NULL,
-                          3,
-                          NULL);
+    //创建任务
+    created = xTaskCreate(control_task, "Control", configMINIMAL_STACK_SIZE, NULL, 3, NULL);
 
     if (created != pdPASS) {
         vQueueDelete(command_queue);
@@ -224,12 +217,15 @@ int control_init(void)
 
 int control_submit(const ControlCommand *command)
 {
-    if (command == NULL ||
-        command_queue == NULL ||
-        command_in_flight) {
+    /* 1. 检查参数及是否已有未完成命令。 */
+    /* 2. 将命令放入队列。 */
+    /* 3. 成功后标记请求在途，防止覆盖未取回结果。 */
+
+    if (command == NULL || command_queue == NULL || command_in_flight) {
         return -1;
     }
 
+    //把 LED 控制命令发送到 FreeRTOS 的命令队列中
     if (xQueueSend(command_queue, command, 0) != pdPASS)
         return -1;
 
@@ -239,6 +235,9 @@ int control_submit(const ControlCommand *command)
 
 int control_receive(ControlResult *result)
 {
+    /* 1. 检查结果指针并尝试读取结果队列。 */
+    /* 2. 取回结果后清除在途标志，允许提交下一条命令。 */
+
     if (result == NULL || result_queue == NULL)
         return -1;
 

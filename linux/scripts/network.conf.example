@@ -1,0 +1,5 @@
+# Install optionally as /etc/amp/network.conf (owned by root).
+AMP_NET_INTERFACE=eth0
+AMP_NET_ADDRESS=192.168.88.101/24
+# Set only when the specified router exists on this subnet.
+AMP_NET_GATEWAY=

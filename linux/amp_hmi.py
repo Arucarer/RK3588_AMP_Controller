@@ -26,9 +26,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-TOKEN = secrets.token_hex(32)
-AMPCTL = ""
-DATABASE = ""
+TOKEN = secrets.token_hex(32)  # TOKEN：Web 控制请求的随机认证令牌
+AMPCTL = ""  # AMPCTL：ampctl 可执行文件路径
+DATABASE = ""  # DATABASE：SQLite 操作日志数据库路径
 
 PAGE = r"""<!doctype html>
 <html lang="zh-CN">
@@ -105,17 +105,21 @@ async function run(action) {
 history();
 </script>
 </html>
-"""
+"""  # PAGE：Web 控制台 HTML 模板
 
 
 def connect_db():
+    # 1. 返回 sqlite3.connect(DATABASE, timeout=5)。
     return sqlite3.connect(DATABASE, timeout=5)
 
 
 def initialize_db():
+    # 1. 创建所需目录。
     Path(DATABASE).parent.mkdir(parents=True, exist_ok=True)
+    # 2. 在 connect_db() 上下文中执行，退出时恢复或释放资源。
     with connect_db() as db:
-        db.execute("""
+        db.execute(
+            """
             CREATE TABLE IF NOT EXISTS operations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -126,19 +130,24 @@ def initialize_db():
                 elapsed_ms REAL,
                 output TEXT NOT NULL DEFAULT ''
             )
-        """)
+        """
+        )
         # 上次服务崩溃时未完成记录的动作，不能假定没有执行。
-        db.execute("""
+        db.execute(
+            """
             UPDATE operations
             SET outcome = 'UNKNOWN_AFTER_RESTART'
             WHERE outcome = 'RUNNING'
-        """)
+        """
+        )
 
 
 def command_args(body):
+    # 1. 检查条件；不满足要求时报告“请求必须是 JSON 对象”。
     if not isinstance(body, dict):
         raise ValueError("请求必须是 JSON 对象")
 
+    # 2. 调用 body.get，保存到 action。
     action = body.get("action")
     commands = {
         "status": ["status"],
@@ -148,39 +157,47 @@ def command_args(body):
         "led_off": ["led", "off"],
     }
 
+    # 3. 检查条件；不满足要求时报告“action 无效”。
     if not isinstance(action, str):
         raise ValueError("action 无效")
 
+    # 4. 检查条件；不满足要求时报告“周期必须为 100～10000 ms，且为 20 的整数倍”。
     if action == "led_blink":
         period = body.get("period_ms")
-        if (type(period) is not int or
-                not 100 <= period <= 10000 or period % 20 != 0):
+        if type(period) is not int or not 100 <= period <= 10000 or period % 20 != 0:
             raise ValueError("周期必须为 100～10000 ms，且为 20 的整数倍")
         return action, ["led", "blink", str(period)]
 
+    # 5. 检查条件；不满足要求时报告“不支持的操作”。
     if action not in commands:
         raise ValueError("不支持的操作")
 
+    # 6. 返回 action, commands[action]。
     return action, commands[action]
 
 
 def execute(action, args):
     # 先持久化操作意图；数据库不可用时不执行硬件命令。
     with connect_db() as db:
-        cursor = db.execute("""
+        cursor = db.execute(
+            """
             INSERT INTO operations
                 (started_at, action, arguments, outcome)
             VALUES (?, ?, ?, 'RUNNING')
-        """, (
-            datetime.now(timezone.utc).isoformat(),
-            action,
-            json.dumps(args),
-        ))
+        """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                action,
+                json.dumps(args),
+            ),
+        )
         record_id = cursor.lastrowid
 
+    # 1. 调用 time.monotonic_ns，保存到 begin。
     begin = time.monotonic_ns()
     returncode = None
 
+    # 2. 执行本段操作，捕获 subprocess.TimeoutExpired, OSError。
     try:
         completed = subprocess.run(
             [AMPCTL, *args],
@@ -200,8 +217,10 @@ def execute(action, args):
         outcome = "EXEC_FAILED"
         output = str(exc)
 
+    # 3. 调用 time.monotonic_ns，保存到 elapsed_ms。
     elapsed_ms = (time.monotonic_ns() - begin) / 1_000_000
 
+    # 4. 调用 round，保存到 result。
     result = {
         "id": record_id,
         "outcome": outcome,
@@ -211,31 +230,39 @@ def execute(action, args):
         "output": output,
     }
 
+    # 5. 执行本段操作，捕获 sqlite3.Error。
     try:
         with connect_db() as db:
-            db.execute("""
+            db.execute(
+                """
                 UPDATE operations
                 SET outcome=?, returncode=?, elapsed_ms=?, output=?
                 WHERE id=?
-            """, (outcome, returncode, elapsed_ms, output, record_id))
+            """,
+                (outcome, returncode, elapsed_ms, output, record_id),
+            )
     except sqlite3.Error as exc:
         result["log_error"] = str(exc)
         result["warning"] = "操作已尝试执行，但结果日志未保存，请勿自动重试。"
 
+    # 6. 返回 result。
     return result
 
 
 class Handler(BaseHTTPRequestHandler):
     def setup(self):
+        # 1. 调用 super().setup。
         super().setup()
         self.connection.settimeout(10)
 
     def respond(self, status, data, content_type="application/json"):
+        # 1. 按条件 content_type == "application/json" 选择处理分支。
         if content_type == "application/json":
             data = json.dumps(data, ensure_ascii=False).encode("utf-8")
         else:
             data = data.encode("utf-8")
 
+        # 2. 调用 self.send_response。
         self.send_response(status)
         self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -246,17 +273,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        # 1. 调用 urlsplit，保存到 path。
         path = urlsplit(self.path).path
 
+        # 2. 按条件 path == "/" 选择处理分支。
         if path == "/":
             self.respond(200, PAGE.replace("__TOKEN__", TOKEN), "text/html")
         elif path == "/api/history":
             try:
                 with connect_db() as db:
                     db.row_factory = sqlite3.Row
-                    rows = db.execute("""
+                    rows = db.execute(
+                        """
                         SELECT * FROM operations ORDER BY id DESC LIMIT 50
-                    """).fetchall()
+                    """
+                    ).fetchall()
                 self.respond(200, [dict(row) for row in rows])
             except sqlite3.Error:
                 self.respond(503, {"error": "日志数据库不可用"})
@@ -264,15 +295,19 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {"error": "Not found"})
 
     def do_POST(self):
+        # 1. 按条件 urlsplit(self.path).path != "/api/command" 选择处理分支。
         if urlsplit(self.path).path != "/api/command":
             self.respond(404, {"error": "Not found"})
             return
 
+        # 2. 调用 self.headers.get，保存到 supplied。
         supplied = self.headers.get("X-AMP-Token", "")
+        # 3. 按条件 not hmac.compare_digest(supplied, TOKEN) 选择处理分支。
         if not hmac.compare_digest(supplied, TOKEN):
             self.respond(403, {"error": "请求令牌无效，请刷新页面"})
             return
 
+        # 4. 执行本段操作，捕获 (ValueError, UnicodeError)。
         try:
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("不支持 Transfer-Encoding")
@@ -294,33 +329,40 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(400, {"error": str(exc)})
             return
 
+        # 5. 执行本段操作，捕获 sqlite3.Error。
         try:
             result = execute(action, args)
         except sqlite3.Error:
             self.respond(503, {"error": "无法记录操作，命令未执行"})
             return
 
+        # 6. 调用 self.respond。
         self.respond(200, result)
 
 
 def main():
     global AMPCTL, DATABASE
 
+    # 1. 建立命令行参数解析器，保存到 parser。
     parser = argparse.ArgumentParser()
     parser.add_argument("--ampctl", default="/opt/amp/bin/ampctl")
     parser.add_argument("--database", default="/userdata/amp/operations.db")
     parser.add_argument("--port", type=int, default=8088)
     options = parser.parse_args()
 
+    # 2. 调用 str，保存到 AMPCTL。
     AMPCTL = str(Path(options.ampctl).resolve())
     DATABASE = str(Path(options.database).resolve())
 
+    # 3. 按条件 not os.path.isfile(AMPCTL) or not os.access(AMPCTL, os.X_OK) 选择处理分支。
     if not os.path.isfile(AMPCTL) or not os.access(AMPCTL, os.X_OK):
         parser.error("ampctl 不存在或不可执行")
 
+    # 4. 按条件 not 1 <= options.port <= 65535 选择处理分支。
     if not 1 <= options.port <= 65535:
         parser.error("端口无效")
 
+    # 5. 调用 os.umask。
     os.umask(0o077)
     initialize_db()
 
@@ -328,6 +370,7 @@ def main():
     server = HTTPServer(("127.0.0.1", options.port), Handler)
     print(f"AMP HMI: http://127.0.0.1:{options.port}", flush=True)
 
+    # 6. 执行本段操作，捕获 KeyboardInterrupt。
     try:
         server.serve_forever()
     except KeyboardInterrupt:

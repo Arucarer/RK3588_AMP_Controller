@@ -1,0 +1,60 @@
+#!/bin/sh
+# Install as /etc/init.d/S97amp-network in the board rootfs.
+
+configure_network()
+{
+    # 1. 读取默认配置及可选的板端配置文件。
+    AMP_NET_INTERFACE=eth0  # 要配置的网络接口
+    AMP_NET_ADDRESS=192.168.88.101/24  # 静态 IPv4 地址及前缀长度
+    AMP_NET_GATEWAY=  # 可选默认网关，空值表示不配置默认路由
+
+    # 配置文件使用 Shell 赋值语法，应由 root 管理。
+    if [ -f /etc/amp/network.conf ]; then
+        . /etc/amp/network.conf || return 1
+    fi
+
+    if [ -z "$AMP_NET_INTERFACE" ] || [ -z "$AMP_NET_ADDRESS" ]; then
+        echo "AMP network: interface/address must not be empty" >&2
+        return 1
+    fi
+
+    # 2. 最多等待 10 次，确认网络接口已经创建。
+    attempts=0  # 等待接口出现的累计重试次数
+    until ip link show dev "$AMP_NET_INTERFACE" >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 10 ]; then
+            echo "AMP network: interface unavailable: $AMP_NET_INTERFACE" >&2
+            return 1
+        fi
+        sleep 1
+    done
+
+    # 3. 启用接口并设置静态地址。
+    ip link set dev "$AMP_NET_INTERFACE" up || return 1
+    ip -4 addr replace "$AMP_NET_ADDRESS" dev "$AMP_NET_INTERFACE" || return 1
+
+    # 4. 配置非空的默认网关；开发板与虚拟机直连时可留空。
+    if [ -n "$AMP_NET_GATEWAY" ]; then
+        ip -4 route replace default via "$AMP_NET_GATEWAY" \
+            dev "$AMP_NET_INTERFACE" || return 1
+    fi
+
+    echo "AMP network: $AMP_NET_INTERFACE configured as $AMP_NET_ADDRESS"
+}
+
+case "${1:-}" in
+    start|restart|reload)
+        configure_network
+        ;;
+    stop)
+        # 停止服务时保留网络，维持 SSH 连接。
+        :
+        ;;
+    status)
+        ip -4 addr show
+        ;;
+    *)
+        echo "usage: $0 {start|restart|reload|stop|status}" >&2
+        exit 2
+        ;;
+esac

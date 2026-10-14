@@ -1,23 +1,23 @@
-#include "amp_ab_store.h"
+#include "amp_ab_store.h" /* 引入启动元数据块存储及提交接口 */
 
-#include <string.h>
+#include <string.h> /* 引入内存复制、清零及字符串处理接口 */
 
 static int store_valid(const AmpAbStore *store)
 {
+    /* 1. 检查存储回调、缓冲区与容量。 */
+    /* 2. 返回存储接口是否满足元数据访问要求。 */
+
     uint64_t blocks;
     uint64_t first;
     uint64_t second;
 
-    if (!store || !store->read_block ||
-        !store->partition_blocks || !store->block_size ||
-        store->block_size > AMP_AB_META_BYTES ||
-        AMP_AB_META_BYTES % store->block_size != 0)
+    if (!store || !store->read_block || !store->partition_blocks || !store->block_size ||
+        store->block_size > AMP_AB_META_BYTES || AMP_AB_META_BYTES % store->block_size != 0)
         return 0;
 
     blocks = AMP_AB_META_BYTES / store->block_size;
 
-    if (store->partition_blocks < blocks ||
-        store->copy_lba[0] > store->partition_blocks - blocks ||
+    if (store->partition_blocks < blocks || store->copy_lba[0] > store->partition_blocks - blocks ||
         store->copy_lba[1] > store->partition_blocks - blocks)
         return 0;
 
@@ -33,6 +33,9 @@ static int store_valid(const AmpAbStore *store)
 
 static int buffers_overlap(const void *a, const void *b, size_t length)
 {
+    /* 1. 计算两个缓冲区的地址范围。 */
+    /* 2. 判断范围是否交叠，避免读写校验互相覆盖。 */
+
     uintptr_t x = (uintptr_t)a;
     uintptr_t y = (uintptr_t)b;
 
@@ -42,28 +45,24 @@ static int buffers_overlap(const void *a, const void *b, size_t length)
     return x - y < length;
 }
 
-int amp_ab_store_read(
-    const AmpAbStore *store,
-    unsigned int index,
-    void *record,
-    size_t capacity)
+int amp_ab_store_read(const AmpAbStore *store, unsigned int index, void *record, size_t capacity)
 {
+    /* 1. 校验存储接口、副本编号和输出容量。 */
+    /* 2. 按块读取指定副本，读取失败时清空输出。 */
+    /* 3. 返回读取结果，记录解码由上层完成。 */
+
     uint8_t *output = record;
     size_t offset;
     uint64_t lba;
 
-    if (!store_valid(store) ||
-        index >= AMP_AB_STORE_COPY_COUNT ||
-        !record || capacity < AMP_AB_META_BYTES)
+    if (!store_valid(store) || index >= AMP_AB_STORE_COPY_COUNT || !record ||
+        capacity < AMP_AB_META_BYTES)
         return AMP_AB_STORE_EINVAL;
 
     lba = store->copy_lba[index];
 
-    for (offset = 0; offset < AMP_AB_META_BYTES;
-         offset += store->block_size, ++lba) {
-        if (store->read_block(store->ctx, lba,
-                              output + offset,
-                              store->block_size) != 0) {
+    for (offset = 0; offset < AMP_AB_META_BYTES; offset += store->block_size, ++lba) {
+        if (store->read_block(store->ctx, lba, output + offset, store->block_size) != 0) {
             memset(output, 0, AMP_AB_META_BYTES);
             return AMP_AB_STORE_EIO;
         }
@@ -72,13 +71,13 @@ int amp_ab_store_read(
     return AMP_AB_STORE_OK;
 }
 
-int amp_ab_store_commit_other(
-    const AmpAbStore *store,
-    unsigned int source_index,
-    const void *encoded_record,
-    void *scratch,
-    size_t scratch_len)
+int amp_ab_store_commit_other(const AmpAbStore *store, unsigned int source_index,
+                              const void *encoded_record, void *scratch, size_t scratch_len)
 {
+    /* 1. 校验提交状态、目标副本和缓冲区。 */
+    /* 2. 写入另一副本并同步存储。 */
+    /* 3. 读回并比较记录，确认提交完整。 */
+
     const uint8_t *input = encoded_record;
     AMPABState proposed;
     AMPABState current;
@@ -89,11 +88,8 @@ int amp_ab_store_commit_other(
     uint64_t lba;
     int ret;
 
-    if (!store_valid(store) ||
-        !store->write_block ||
-        source_index >= AMP_AB_STORE_COPY_COUNT ||
-        !encoded_record || !scratch ||
-        scratch_len < AMP_AB_META_BYTES ||
+    if (!store_valid(store) || !store->write_block || source_index >= AMP_AB_STORE_COPY_COUNT ||
+        !encoded_record || !scratch || scratch_len < AMP_AB_META_BYTES ||
         buffers_overlap(encoded_record, scratch, AMP_AB_META_BYTES))
         return AMP_AB_STORE_EINVAL;
 
@@ -107,16 +103,14 @@ int amp_ab_store_commit_other(
     if (amp_ab_meta_decode(input, &proposed) != AMP_AB_OK)
         return AMP_AB_STORE_EINVAL;
 
-    ret = amp_ab_store_read(store, source_index,
-                            scratch, scratch_len);
+    ret = amp_ab_store_read(store, source_index, scratch, scratch_len);
     if (ret != AMP_AB_STORE_OK)
         return ret;
 
     if (amp_ab_meta_decode(scratch, &current) != AMP_AB_OK)
         return AMP_AB_STORE_EVERIFY;
 
-    if (current.generation == UINT64_MAX ||
-        proposed.generation != current.generation + 1)
+    if (current.generation == UINT64_MAX || proposed.generation != current.generation + 1)
         return AMP_AB_STORE_ESTALE;
 
     target = source_index ^ 1U;
@@ -148,11 +142,8 @@ int amp_ab_store_commit_other(
 
     lba = store->copy_lba[target];
 
-    for (offset = 0; offset < AMP_AB_META_BYTES;
-         offset += store->block_size, ++lba) {
-        if (store->write_block(store->ctx, lba,
-                               input + offset,
-                               store->block_size) != 0)
+    for (offset = 0; offset < AMP_AB_META_BYTES; offset += store->block_size, ++lba) {
+        if (store->write_block(store->ctx, lba, input + offset, store->block_size) != 0)
             return AMP_AB_STORE_EIO;
     }
 

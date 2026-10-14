@@ -1,7 +1,8 @@
 #!/bin/sh
-# Read-only runtime resource inventory.
+# 只读采集 CAN1、UART3 的运行期资源与占用信息。
 set -eu
 
+# 1. 核对启动参数、设备树节点及平台驱动绑定状态。
 echo "=== Boot context ==="
 cat /proc/cmdline
 
@@ -46,6 +47,7 @@ for name in fea60000.can feb60000.serial; do
     fi
 done
 
+# 2. 建立 CAN、UART 设备节点与硬件路径的对应关系。
 echo "=== CAN interface mapping ==="
 for path in /sys/class/net/*; do
     [ -f "$path/type" ] || continue
@@ -63,6 +65,7 @@ for path in /sys/class/tty/ttyS*; do
     readlink -f "$path/device" || true
 done
 
+# 3. 检查中断记录和 UART3 的进程文件描述符占用。
 echo "=== Relevant interrupts ==="
 grep -i -E 'can|feb60000|uart|serial' /proc/interrupts || true
 

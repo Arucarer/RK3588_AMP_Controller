@@ -15,12 +15,15 @@ class GptWriteUncertain(RuntimeError):
 
 
 def require(ok, message):
+    # 1. 按条件 not ok 选择处理分支。
     if not ok:
         raise RuntimeError(message)
 
 
 def write_full(fd, data, offset):
+    # 1. 调用 memoryview，保存到 view。
     view = memoryview(data)
+    # 2. 在 view 成立期间持续处理，退出时结束本轮循环。
     while view:
         count = os.pwrite(fd, view, offset)
         require(count > 0, "GPT 写入未推进")
@@ -29,52 +32,56 @@ def write_full(fd, data, offset):
 
 
 def same_gpt(fd, sectors, expected_primary, expected_backup, entries):
+    # 1. 调用 preflight.read_gpt，保存到 primary。
     primary = preflight.read_gpt(fd, 1, sectors)
     backup = preflight.read_gpt(fd, sectors - 1, sectors)
-    require(primary["header"] == expected_primary,
-            "主 GPT 头读回不一致")
-    require(backup["header"] == expected_backup,
-            "备 GPT 头读回不一致")
-    require(primary["entries"] == backup["entries"] == entries,
-            "GPT 数组读回不一致")
+    require(primary["header"] == expected_primary, "主 GPT 头读回不一致")
+    require(backup["header"] == expected_backup, "备 GPT 头读回不一致")
+    require(primary["entries"] == backup["entries"] == entries, "GPT 数组读回不一致")
 
 
-def validate_transition(old_primary, old_backup, new_primary, new_backup,
-                        old_entries, new_entries, plan):
+def validate_transition(
+    old_primary, old_backup, new_primary, new_backup, old_entries, new_entries, plan
+):
+    # 1. 调用 prepare.header_decode，保存到 op。
     op = prepare.header_decode(old_primary)
     ob = prepare.header_decode(old_backup)
     np = prepare.header_decode(new_primary)
     nb = prepare.header_decode(new_backup)
 
+    # 2. 设置 sectors，供后续逻辑使用。
     sectors = plan["disk_sectors"]
     require(plan["sector_bytes"] == 512, "扇区规格错误")
 
+    # 3. 遍历 ((op, ob), (np, nb))，逐项处理 primary, backup。
     for primary, backup in ((op, ob), (np, nb)):
-        require(primary["current"] == 1
-                and primary["backup"] == sectors - 1
-                and backup["current"] == sectors - 1
-                and backup["backup"] == 1,
-                "GPT 主备指针错误")
+        require(
+            primary["current"] == 1
+            and primary["backup"] == sectors - 1
+            and backup["current"] == sectors - 1
+            and backup["backup"] == 1,
+            "GPT 主备指针错误",
+        )
         for field in ("first", "last", "disk_guid", "count", "entry_size"):
-            require(primary[field] == backup[field],
-                    "主备 GPT 规格不一致")
+            require(primary[field] == backup[field], "主备 GPT 规格不一致")
 
     # 转换仅允许改变数组 CRC 和头 CRC，其他头字段保持原样。
-    for before, after in ((old_primary, new_primary),
-                          (old_backup, new_backup)):
+    for before, after in ((old_primary, new_primary), (old_backup, new_backup)):
         left, right = bytearray(before), bytearray(after)
         for start, end in ((16, 20), (88, 92)):
             left[start:end] = right[start:end]
         require(left == right, "GPT 头出现未授权变化")
 
-    require(op["last"] == plan["last_usable_sector"],
-            "GPT 可用边界与计划不一致")
+    # 4. 调用 require。
+    require(op["last"] == plan["last_usable_sector"], "GPT 可用边界与计划不一致")
 
+    # 5. 调用 prepare.decode_entries，保存到 old_parts。
     old_parts = prepare.decode_entries(old_entries, op)
     prepare.decode_entries(old_entries, ob)
     new_parts = prepare.decode_entries(new_entries, np)
     prepare.decode_entries(new_entries, nb)
 
+    # 6. 遍历 ( (old_parts, plan["expected_current_partitions"]), (new_parts, plan["proposed_partitions"]), )，逐项处理 actual, expected。
     for actual, expected in (
         (old_parts, plan["expected_current_partitions"]),
         (new_parts, plan["proposed_partitions"]),
@@ -83,81 +90,93 @@ def validate_transition(old_primary, old_backup, new_primary, new_backup,
         previous = op["first"] - 1
         for part, wanted in zip(actual, expected):
             for field in prepare.FIELDS:
-                require(part[field] == wanted[field],
-                        "分区布局不匹配：" + wanted["name"])
-            require(previous < part["start_sector"]
-                    and part["end_sector"] <= op["last"],
-                    "分区重叠或越界")
+                require(part[field] == wanted[field], "分区布局不匹配：" + wanted["name"])
+            require(
+                previous < part["start_sector"] and part["end_sector"] <= op["last"],
+                "分区重叠或越界",
+            )
             previous = part["end_sector"]
 
-    require(len(old_parts) == 8 and len(new_parts) == 12,
-            "仅支持旧八分区到新十二分区")
+    # 7. 调用 require。
+    require(len(old_parts) == 8 and len(new_parts) == 12, "仅支持旧八分区到新十二分区")
 
-    require(new_entries[:7 * 128] == old_entries[:7 * 128],
-            "前七个 GPT 项发生变化")
+    # 8. 调用 require。
+    require(new_entries[: 7 * 128] == old_entries[: 7 * 128], "前七个 GPT 项发生变化")
 
-    old_userdata = bytearray(old_entries[7 * 128:8 * 128])
-    new_userdata = bytearray(new_entries[7 * 128:8 * 128])
+    # 9. 分配可写字节缓冲区，保存到 old_userdata。
+    old_userdata = bytearray(old_entries[7 * 128 : 8 * 128])
+    new_userdata = bytearray(new_entries[7 * 128 : 8 * 128])
     old_userdata[40:48] = new_userdata[40:48]
-    require(old_userdata == new_userdata,
-            "userdata 除结束扇区外发生变化")
+    require(old_userdata == new_userdata, "userdata 除结束扇区外发生变化")
 
-    require([p["partuuid"] for p in old_parts] ==
-            [p["partuuid"] for p in new_parts[:8]],
-            "旧 PARTUUID 未保留")
+    # 10. 调用 require。
+    require(
+        [p["partuuid"] for p in old_parts] == [p["partuuid"] for p in new_parts[:8]],
+        "旧 PARTUUID 未保留",
+    )
     guids = [p["partuuid"] for p in new_parts]
-    require(len(set(guids)) == 12
-            and "00000000-0000-0000-0000-000000000000" not in guids,
-            "新 PARTUUID 重复或为空")
+    require(
+        len(set(guids)) == 12 and "00000000-0000-0000-0000-000000000000" not in guids,
+        "新 PARTUUID 重复或为空",
+    )
 
-    require(new_entries[12 * 128:] == old_entries[12 * 128:],
-            "第十二项以后发生变化")
+    # 11. 调用 require。
+    require(new_entries[12 * 128 :] == old_entries[12 * 128 :], "第十二项以后发生变化")
 
+    # 12. 调用 len，保存到 array_sectors。
     array_sectors = (len(new_entries) + 511) // 512
-    require(2 <= np["entries_lba"]
-            and np["entries_lba"] + array_sectors <= np["first"],
-            "主 GPT 数组越界")
-    require(np["last"] < nb["entries_lba"]
-            and nb["entries_lba"] + array_sectors <= sectors - 1,
-            "备 GPT 数组越界")
+    require(
+        2 <= np["entries_lba"] and np["entries_lba"] + array_sectors <= np["first"],
+        "主 GPT 数组越界",
+    )
+    require(
+        np["last"] < nb["entries_lba"] and nb["entries_lba"] + array_sectors <= sectors - 1,
+        "备 GPT 数组越界",
+    )
 
+    # 13. 返回 np, nb。
     return np, nb
 
 
-def apply_transaction(fd, plan, old_files, new_files,
-                      flush, writer=write_full):
+def apply_transaction(fd, plan, old_files, new_files, flush, writer=write_full):
     """
     调用者负责证明 userdata 已缩容并保持未挂载。
     flush 必须提供真实同步，失败必须抛出异常。
     此核心不调用分区表重读，不自动复位或重试。
     """
+    # 1. 调用 require。
     require(callable(flush), "必须提供刷新函数")
 
+    # 2. 设置 old_entries，供后续逻辑使用。
     old_entries = old_files["primary-entries.bin"]
     new_entries = new_files["primary-entries.bin"]
-    require(old_entries == old_files["backup-entries.bin"],
-            "旧主备数组不一致")
-    require(new_entries == new_files["backup-entries.bin"],
-            "新主备数组不一致")
+    require(old_entries == old_files["backup-entries.bin"], "旧主备数组不一致")
+    require(new_entries == new_files["backup-entries.bin"], "新主备数组不一致")
 
+    # 3. 调用 validate_transition，保存到 np, nb。
     np, nb = validate_transition(
         old_files["primary-header.bin"],
         old_files["backup-header.bin"],
         new_files["primary-header.bin"],
         new_files["backup-header.bin"],
-        old_entries, new_entries, plan,
+        old_entries,
+        new_entries,
+        plan,
     )
 
+    # 4. 设置 sectors，供后续逻辑使用。
     sectors = plan["disk_sectors"]
 
     # 所有写入前检查必须在第一次 writer 调用之前完成。
     same_gpt(
-        fd, sectors,
+        fd,
+        sectors,
         old_files["primary-header.bin"],
         old_files["backup-header.bin"],
         old_entries,
     )
 
+    # 5. 设置 operations，供后续逻辑使用。
     operations = (
         ("backup-entries.bin", nb["entries_lba"]),
         ("backup-header.bin", nb["current"]),
@@ -165,49 +184,54 @@ def apply_transaction(fd, plan, old_files, new_files,
         ("primary-header.bin", np["current"]),
     )
 
+    # 6. 执行本段操作，捕获 Exception。
     try:
         for name, lba in operations:
             data = new_files[name]
             writer(fd, data, lba * 512)
             flush(fd)
-            require(os.pread(fd, len(data), lba * 512) == data,
-                    "GPT 写后读回不一致：" + name)
+            require(os.pread(fd, len(data), lba * 512) == data, "GPT 写后读回不一致：" + name)
 
             if name == "backup-header.bin":
                 # 主 GPT 在备用 GPT 验证通过前保持原样。
                 backup = preflight.read_gpt(fd, sectors - 1, sectors)
-                require(backup["header"] ==
-                        new_files["backup-header.bin"]
-                        and backup["entries"] == new_entries,
-                        "备用 GPT 校验失败")
-                require(os.pread(fd, 512, 512) ==
-                        old_files["primary-header.bin"],
-                        "主 GPT 头意外变化")
+                require(
+                    backup["header"] == new_files["backup-header.bin"]
+                    and backup["entries"] == new_entries,
+                    "备用 GPT 校验失败",
+                )
+                require(
+                    os.pread(fd, 512, 512) == old_files["primary-header.bin"], "主 GPT 头意外变化"
+                )
 
         same_gpt(
-            fd, sectors,
+            fd,
+            sectors,
             new_files["primary-header.bin"],
             new_files["backup-header.bin"],
             new_entries,
         )
     except Exception as exc:
         raise GptWriteUncertain(
-            "GPT 写入结果不确定；保留恢复环境，"
-            "不得自动重试、重启或继续部署"
+            "GPT 写入结果不确定；保留恢复环境，" "不得自动重试、重启或继续部署"
         ) from exc
 
 
 def load_files(directory):
+    # 1. 返回组装后的数据或调用结果。
     return {
         name: (directory / name).read_bytes()
         for name in (
-            "primary-header.bin", "primary-entries.bin",
-            "backup-header.bin", "backup-entries.bin"
+            "primary-header.bin",
+            "primary-entries.bin",
+            "backup-header.bin",
+            "backup-entries.bin",
         )
     }
 
 
 def main():
+    # 1. 建立命令行参数解析器，保存到 parser。
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True, type=Path)
     parser.add_argument("--backup-dir", required=True, type=Path)
@@ -216,9 +240,9 @@ def main():
 
     # 本轮入口只接受普通文件，明确拒绝所有块设备和软链接。
     info = args.image.lstat()
-    require(stat.S_ISREG(info.st_mode),
-            "本轮只允许普通磁盘镜像文件")
+    require(stat.S_ISREG(info.st_mode), "本轮只允许普通磁盘镜像文件")
 
+    # 2. 解析 JSON 文本，保存到 plan。
     plan = json.loads(args.plan.read_text())
     old_files = load_files(args.backup_dir)
 
@@ -231,21 +255,25 @@ def main():
         fd = os.open(args.image, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             opened = os.fstat(fd)
-            require(stat.S_ISREG(opened.st_mode)
-                    and (opened.st_dev, opened.st_ino) ==
-                        (info.st_dev, info.st_ino),
-                    "镜像身份变化")
-            require(opened.st_size == plan["disk_sectors"] * 512,
-                    "镜像容量不匹配")
+            require(
+                stat.S_ISREG(opened.st_mode)
+                and (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino),
+                "镜像身份变化",
+            )
+            require(opened.st_size == plan["disk_sectors"] * 512, "镜像容量不匹配")
 
             # 该入口仅用于没有实际文件系统的合成 GPT 镜像测试。
             apply_transaction(
-                fd, plan, old_files, new_files,
+                fd,
+                plan,
+                old_files,
+                new_files,
                 flush=os.fsync,
             )
         finally:
             os.close(fd)
 
+    # 3. 输出执行结果或诊断信息。
     print("PASS: 普通镜像 GPT 转换、刷新、读回验证")
     print("未访问开发板；此入口不负责文件系统缩容")
 

@@ -1,28 +1,34 @@
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L /* 启用 POSIX.1-2008 接口声明，如单调时钟和纳秒休眠 */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <errno.h>    /* 引入 errno 和系统调用错误码 */
+#include <fcntl.h>    /* 引入文件打开选项与文件控制接口 */
+#include <stdint.h>   /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
+#include <stdio.h>    /* 引入标准输入输出接口，如 printf、fprintf */
+#include <stdlib.h>   /* 引入数值转换、内存分配及进程退出等标准库接口 */
+#include <string.h>   /* 引入内存复制、清零及字符串处理接口 */
+#include <sys/stat.h> /* 引入文件属性查询及文件类型判断接口 */
+#include <unistd.h>   /* 引入 POSIX 文件读写、关闭及其他系统接口 */
 
-#include "../common/amp_ab.h"
-#include "../common/amp_ab_meta.h"
+#include "../common/amp_ab.h"      /* 引入 A/B 启动槽状态机接口 */
+#include "../common/amp_ab_meta.h" /* 引入启动元数据编码、校验及双副本选择接口 */
 
 /* 与当前候选布局中 4 MiB 的 abmeta 分区一致。 */
-#define IMAGE_BYTES (4U * 1024U * 1024U)
+#define IMAGE_BYTES (4U * 1024U * 1024U) /* 初始化工具生成的元数据镜像总容量，单位字节 */
 
 static void fail(const char *message)
 {
+    /* 1. 输出错误上下文及系统错误信息。 */
+    /* 2. 以失败状态结束当前工具。 */
+
     fprintf(stderr, "FAIL: %s: %s\n", message, strerror(errno));
     exit(EXIT_FAILURE);
 }
 
 static void write_full(int fd, const void *buffer, size_t bytes)
 {
+    /* 1. 循环读写剩余字节，处理短传输。 */
+    /* 2. 遇到系统调用失败或不完整传输时报错。 */
+
     const unsigned char *p = buffer;
 
     while (bytes != 0) {
@@ -43,6 +49,9 @@ static void write_full(int fd, const void *buffer, size_t bytes)
 
 static void read_full(int fd, void *buffer, size_t bytes)
 {
+    /* 1. 循环读写剩余字节，处理短传输。 */
+    /* 2. 遇到系统调用失败或不完整传输时报错。 */
+
     unsigned char *p = buffer;
 
     while (bytes != 0) {
@@ -63,15 +72,20 @@ static void read_full(int fd, void *buffer, size_t bytes)
 
 static int same_state(const AMPABState *a, const AMPABState *b)
 {
-    return a->generation == b->generation &&
-           a->confirmed_slot == b->confirmed_slot &&
-           a->pending_slot == b->pending_slot &&
-           a->tries_remaining == b->tries_remaining &&
+    /* 1. 比较启动状态或身份信息的各个字段。 */
+    /* 2. 返回是否完全一致，用于检测状态漂移。 */
+
+    return a->generation == b->generation && a->confirmed_slot == b->confirmed_slot &&
+           a->pending_slot == b->pending_slot && a->tries_remaining == b->tries_remaining &&
            a->trial_slot == b->trial_slot;
 }
 
 int main(int argc, char **argv)
 {
+    /* 1. 解析输出路径并初始化默认 A 槽状态。 */
+    /* 2. 编码并写入双副本元数据。 */
+    /* 3. 同步后读回校验，输出初始化结果。 */
+
     AMPABState initial, decoded;
     unsigned char record[AMP_AB_META_BYTES];
     unsigned char check[AMP_AB_META_BYTES];
@@ -88,12 +102,9 @@ int main(int argc, char **argv)
 
     amp_ab_init(&initial);
 
-    if (initial.generation != 1 ||
-        initial.confirmed_slot != AMP_AB_SLOT_A ||
-        initial.pending_slot != AMP_AB_SLOT_NONE ||
-        initial.tries_remaining != 0 ||
-        initial.trial_slot != AMP_AB_SLOT_NONE ||
-        amp_ab_meta_encode(&initial, record) != 0) {
+    if (initial.generation != 1 || initial.confirmed_slot != AMP_AB_SLOT_A ||
+        initial.pending_slot != AMP_AB_SLOT_NONE || initial.tries_remaining != 0 ||
+        initial.trial_slot != AMP_AB_SLOT_NONE || amp_ab_meta_encode(&initial, record) != 0) {
         fprintf(stderr, "FAIL: unexpected initial state or encoding\n");
         return EXIT_FAILURE;
     }
@@ -152,8 +163,7 @@ int main(int argc, char **argv)
         read_full(fd, check, sizeof(check));
 
         if (memcmp(record, check, sizeof(record)) != 0 ||
-            amp_ab_meta_decode(check, &decoded) != 0 ||
-            !same_state(&initial, &decoded)) {
+            amp_ab_meta_decode(check, &decoded) != 0 || !same_state(&initial, &decoded)) {
             fprintf(stderr, "FAIL: copy %u verification\n", copy);
             close(fd);
             return EXIT_FAILURE;

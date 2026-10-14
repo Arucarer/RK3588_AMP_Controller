@@ -1,28 +1,28 @@
-#include "amp_ab_boot.h"
+#include "amp_ab_boot.h" /* 引入 A/B 启动事务及槽预检接口 */
 
-#include <string.h>
+#include <string.h> /* 引入内存复制、清零及字符串处理接口 */
 
 static int state_equal(const AMPABState *a, const AMPABState *b)
 {
-    return a->generation == b->generation &&
-           a->confirmed_slot == b->confirmed_slot &&
-           a->pending_slot == b->pending_slot &&
-           a->tries_remaining == b->tries_remaining &&
+    /* 1. 比较启动状态或身份信息的各个字段。 */
+    /* 2. 返回是否完全一致，用于检测状态漂移。 */
+
+    return a->generation == b->generation && a->confirmed_slot == b->confirmed_slot &&
+           a->pending_slot == b->pending_slot && a->tries_remaining == b->tries_remaining &&
            a->trial_slot == b->trial_slot;
 }
 
-static int load_metadata(
-    const AmpAbStore *store,
-    AmpAbBootWorkspace *work,
-    AMPABMetaSelection *selection,
-    int *detail)
+static int load_metadata(const AmpAbStore *store, AmpAbBootWorkspace *work,
+                         AMPABMetaSelection *selection, int *detail)
 {
+    /* 1. 读取双副本元数据。 */
+    /* 2. 校验并选择当前有效状态，返回读取或解码错误。 */
+
     int ret;
     unsigned int i;
 
     for (i = 0; i < 2; ++i) {
-        ret = amp_ab_store_read(
-            store, i, work->copy[i], AMP_AB_META_BYTES);
+        ret = amp_ab_store_read(store, i, work->copy[i], AMP_AB_META_BYTES);
 
         if (ret != AMP_AB_STORE_OK) {
             *detail = ret;
@@ -30,8 +30,7 @@ static int load_metadata(
         }
     }
 
-    ret = amp_ab_meta_select(
-        work->copy[0], work->copy[1], selection);
+    ret = amp_ab_meta_select(work->copy[0], work->copy[1], selection);
 
     if (ret != AMP_AB_OK) {
         *detail = ret;
@@ -41,13 +40,13 @@ static int load_metadata(
     return AMP_AB_BOOT_OK;
 }
 
-int amp_ab_boot_transaction(
-    const AmpAbStore *store,
-    AmpAbBootPreflight preflight,
-    void *preflight_ctx,
-    AmpAbBootWorkspace *work,
-    AmpAbBootResult *result)
+int amp_ab_boot_transaction(const AmpAbStore *store, AmpAbBootPreflight preflight,
+                            void *preflight_ctx, AmpAbBootWorkspace *work, AmpAbBootResult *result)
 {
+    /* 1. 加载当前元数据并生成启动决策。 */
+    /* 2. 按决策需要提交下一份元数据。 */
+    /* 3. 完成提交校验后向调用方返回可启动槽位。 */
+
     AMPABMetaSelection selected;
     AMPABMetaSelection verified;
     AMPABDecision decision;
@@ -96,12 +95,8 @@ int amp_ab_boot_transaction(
          * commit_other 会重新检查当前代次，并要求同步回调。
          * work->encoded 和 work->copy[0] 是独立缓冲区。
          */
-        ret = amp_ab_store_commit_other(
-            store,
-            selected.selected_copy,
-            work->encoded,
-            work->copy[0],
-            AMP_AB_META_BYTES);
+        ret = amp_ab_store_commit_other(store, selected.selected_copy, work->encoded, work->copy[0],
+                                        AMP_AB_META_BYTES);
 
         if (ret != AMP_AB_STORE_OK) {
             result->detail = ret;

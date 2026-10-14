@@ -1,10 +1,12 @@
 #!/bin/sh
-# Install only with the coordinated rootfs deployment, not on the live board.
+# 随配套 rootfs 部署为启动服务。
 case "$1" in
     start)
+        # 1. 准备日志目录。
         mkdir -p /var/log/amp
+        # 2. 后台运行启动健康检查，将输出追加到日志。
         python3 /opt/amp/amp_ab_boot_health.py >>/var/log/amp/boot-health.log 2>&1 &
         ;;
-    stop) : ;; # Do not cancel trial health/confirmation during normal shutdown.
+    stop) : ;; # 正常停止时保留试启动健康检查及确认流程。
     *) echo "usage: $0 start|stop" >&2; exit 1 ;;
 esac

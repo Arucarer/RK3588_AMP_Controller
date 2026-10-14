@@ -4,18 +4,21 @@
  * 不代表已验证 eMMC 掉电安全。
  */
 
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
+#include <assert.h> /* 引入 assert 断言，用于验证测试预期 */
+#include <stdio.h>  /* 引入标准输入输出接口，如 printf、fprintf */
+#include <string.h> /* 引入内存复制、清零及字符串处理接口 */
 
-#include "../common/amp_ab_meta.h"
+#include "../common/amp_ab_meta.h" /* 引入启动元数据编码、校验及双副本选择接口 */
 
-static uint8_t copy0[AMP_AB_META_BYTES];
-static uint8_t copy1[AMP_AB_META_BYTES];
-static uint8_t damaged[AMP_AB_META_BYTES];
+static uint8_t copy0[AMP_AB_META_BYTES]; /* copy0：元数据测试副本 0 */
+static uint8_t copy1[AMP_AB_META_BYTES]; /* copy1：元数据测试副本 1 */
+static uint8_t damaged[AMP_AB_META_BYTES]; /* damaged：用于注入损坏的元数据测试缓冲区 */
 
 int main(void)
 {
+    /* 1. 准备当前测试使用的输入、模拟状态与预期结果。 */
+    /* 2. 调用被测接口，断言返回值及状态变化符合预期。 */
+
     AMPABState initial;
     AMPABState pending;
     AMPABState decoded;
@@ -62,11 +65,9 @@ int main(void)
         memcpy(damaged, copy1, sizeof(damaged));
         damaged[i] ^= 1U;
 
-        assert(amp_ab_meta_decode(damaged, &decoded)
-               == AMP_AB_META_INVALID);
+        assert(amp_ab_meta_decode(damaged, &decoded) == AMP_AB_META_INVALID);
 
-        assert(amp_ab_meta_select(copy0, damaged, &selected)
-               == AMP_AB_OK);
+        assert(amp_ab_meta_select(copy0, damaged, &selected) == AMP_AB_OK);
         assert(selected.valid_mask == 1);
         assert(selected.selected_copy == 0);
     }
@@ -75,19 +76,16 @@ int main(void)
     conflict = initial;
     conflict.generation = pending.generation;
     assert(amp_ab_meta_encode(&conflict, damaged) == AMP_AB_OK);
-    assert(amp_ab_meta_select(damaged, copy1, &selected)
-           == AMP_AB_META_CONFLICT);
+    assert(amp_ab_meta_select(damaged, copy1, &selected) == AMP_AB_META_CONFLICT);
 
     /* 全零、全 FF 均不能触发自动初始化。 */
     memset(copy0, 0, sizeof(copy0));
     memset(copy1, 0xff, sizeof(copy1));
-    assert(amp_ab_meta_select(copy0, copy1, &selected)
-           == AMP_AB_META_INVALID);
+    assert(amp_ab_meta_select(copy0, copy1, &selected) == AMP_AB_META_INVALID);
 
     /* 非法状态不能生成有效记录。 */
     initial.generation = 0;
-    assert(amp_ab_meta_encode(&initial, copy0)
-           == AMP_AB_META_INVALID);
+    assert(amp_ab_meta_encode(&initial, copy0) == AMP_AB_META_INVALID);
 
     puts("PASS: 固定格式、小端编码、CRC损坏检测、双副本选择与同代次冲突");
     return 0;

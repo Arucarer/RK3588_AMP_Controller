@@ -1,27 +1,27 @@
-#include <stdint.h>
-#include "FreeRTOS.h"
-#include "task.h"
-#include "irq_timer.h"
-#include "drivers/amp_bus_irq.h"
-#include "drivers/amp_bus_handoff.h"
+#include <stdint.h>                  /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
+#include "FreeRTOS.h"                /* 引入 FreeRTOS 内核类型、配置及基础接口 */
+#include "task.h"                    /* 引入 FreeRTOS 任务、延时及调度接口 */
+#include "irq_timer.h"               /* 引入系统 Tick 定时器及中断接口 */
+#include "drivers/amp_bus_irq.h"     /* 引入总线中断回调注册及分发接口 */
+#include "drivers/amp_bus_handoff.h" /* 引入总线资源交接、MMIO 访问及截止时间接口 */
 
-#define GICR_BASE       0xFE680000ULL
-#define GICR_END        0xFE780000ULL
-#define TIMER_INTID     30U
-#define TIMER_MASK      (1U << TIMER_INTID)
+#define GICR_BASE 0xFE680000ULL /* GIC Redistributor 搜索区域的起始物理地址 */
+#define GICR_END 0xFE780000ULL /* GIC Redistributor 搜索区域的结束地址，不包含此地址 */
+#define TIMER_INTID 30U        /* ARM 通用物理定时器的 GIC 中断号 */
+#define TIMER_MASK (1U << TIMER_INTID) /* 定时器中断在本核 PPI 寄存器中的位掩码 */
 
+#define READ_SYS(reg) /* 读取指定 ARM64 系统寄存器，返回 64 位值 */                  \
+    ({                                                                                             \
+        uint64_t value;                                                                            \
+        __asm__ volatile("mrs %0, " #reg : "=r"(value));                                           \
+        value;                                                                                     \
+    })
 
-#define READ_SYS(reg) ({                         \
-    uint64_t value;                              \
-    __asm__ volatile("mrs %0, " #reg : "=r"(value)); \
-    value;                                      \
-})
-
-#define WRITE_SYS(reg, value) do {               \
-    uint64_t temp = (uint64_t)(value);            \
-    __asm__ volatile("msr " #reg ", %0"           \
-                     :: "r"(temp) : "memory");   \
-} while (0)
+#define WRITE_SYS(reg, value) /* 写入指定 ARM64 系统寄存器，并声明编译器内存屏障 */ \
+    do {                                                                                                \
+        uint64_t temp = (uint64_t)(value);                                                              \
+        __asm__ volatile("msr " #reg ", %0" ::"r"(temp) : "memory");                                    \
+    } while (0)
 
 /*
  * ICC register encodings:
@@ -35,44 +35,56 @@
  * DIR     S3_0_C12_C11_1
  */
 
+/* 系统 Tick 和 GIC 配置的共享诊断记录。 */
 typedef struct {
-    uint64_t magic;          /* +0x00 */
-    uint64_t start;          /* +0x08: Linux writes 1 */
-    uint64_t stage;          /* +0x10 */
-    uint64_t error;          /* +0x18 */
-    uint64_t irq_count;      /* +0x20 */
-    uint64_t last_intid;     /* +0x28 */
-    uint64_t counter_hz;     /* +0x30 */
-    uint64_t period;         /* +0x38 */
-    uint64_t gicr;           /* +0x40 */
-    uint64_t last_counter;   /* +0x48 */
-    uint64_t unexpected;     /* +0x50 */
-    uint64_t icc_ctlr;       /* +0x58 */
+    uint64_t magic;        /* +0x00：定时器诊断记录的有效标记 */
+    uint64_t start;        /* +0x08：Linux 写入的启动许可，等于 1 时继续初始化 */
+    uint64_t stage;        /* +0x10：定时器初始化和中断处理阶段 */
+    uint64_t error;        /* +0x18：定时器或中断初始化失败原因码 */
+    uint64_t irq_count;    /* +0x20：已处理的定时器中断累计次数 */
+    uint64_t last_intid;   /* +0x28：最近读取的 GIC 中断号 */
+    uint64_t counter_hz;   /* +0x30：ARM 通用计数器频率，单位 Hz */
+    uint64_t period;       /* +0x38：每个系统 Tick 对应的计数器周期数 */
+    uint64_t gicr;         /* +0x40：当前 CPU 对应的 Redistributor 物理地址 */
+    uint64_t last_counter; /* +0x48：最近记录的硬件计数器值 */
+    uint64_t unexpected;   /* +0x50：未被已知处理器接管的中断累计次数 */
+    uint64_t icc_ctlr;     /* +0x58：保存的 GIC CPU 接口控制寄存器值 */
 } TimerInfo;
 
 static volatile TimerInfo *const info =
-    (volatile TimerInfo *)(uintptr_t)0x20FE0200ULL;
+    (volatile TimerInfo *)(uintptr_t)0x20FE0200ULL; /* info：系统定时器诊断信息共享区 */
 
-static uint64_t timer_period;
-static uint64_t cpu_ctlr;
+static uint64_t timer_period; /* timer_period：系统 Tick 定时器的计数周期 */
+static uint64_t cpu_ctlr;     /* cpu_ctlr：保存的 GIC CPU 接口控制值 */
 
 static inline void barrier(void)
 {
+    /* 1. 执行内存屏障，保证共享数据与状态标志的访问顺序。 */
+
     __asm__ volatile("dsb sy\nisb" ::: "memory");
 }
 
 static inline uint32_t read32(uint64_t address)
 {
+    /* 1. 把寄存器地址转换为 volatile 指针并读取。 */
+    /* 2. 返回读取值，由调用方解释状态位。 */
+
     return *(volatile uint32_t *)(uintptr_t)address;
 }
 
 static inline void write32(uint64_t address, uint32_t value)
 {
+    /* 1. 定位目标 MMIO 寄存器。 */
+    /* 2. 通过 volatile 访问写入指定值。 */
+
     *(volatile uint32_t *)(uintptr_t)address = value;
 }
 
 static __attribute__((noreturn)) void stop_test(uint64_t error)
 {
+    /* 1. 屏蔽本核 IRQ 并关闭系统定时器。 */
+    /* 2. 保存定时器错误码，通过屏障发布后永久等待。 */
+
     __asm__ volatile("msr daifset, #2" ::: "memory");
     WRITE_SYS(cntp_ctl_el0, 0);
     info->error = error;
@@ -85,6 +97,10 @@ static __attribute__((noreturn)) void stop_test(uint64_t error)
 /* Bounded polling: no infinite wait on a GIC register. */
 static int wait_clear(uint64_t address, uint32_t mask)
 {
+    /* 1. 设置最大轮询次数。 */
+    /* 2. 轮询目标寄存器，掩码位全部清零时返回成功。 */
+    /* 3. 耗尽轮询次数时返回失败。 */
+
     unsigned int remaining = 1000000;
 
     while (remaining--) {
@@ -98,15 +114,16 @@ static int wait_clear(uint64_t address, uint32_t mask)
 
 static uint64_t find_redistributor(void)
 {
+    /* 1. 读取 CPU 亲和标识。 */
+    /* 2. 遍历 GIC Redistributor 区域匹配当前核心。 */
+    /* 3. 返回本核区域地址，找不到时进入错误路径。 */
+
     uint64_t mpidr = READ_SYS(mpidr_el1);
-    uint32_t affinity = (uint32_t)(
-        (mpidr & 0x00FFFFFFULL) |
-        ((mpidr >> 8) & 0xFF000000ULL));
+    uint32_t affinity = (uint32_t)((mpidr & 0x00FFFFFFULL) | ((mpidr >> 8) & 0xFF000000ULL));
     uint64_t base;
 
     for (base = GICR_BASE; base < GICR_END;) {
-        uint64_t typer =
-            *(volatile uint64_t *)(uintptr_t)(base + 0x8);
+        uint64_t typer = *(volatile uint64_t *)(uintptr_t)(base + 0x8);
 
         if ((uint32_t)(typer >> 32) == affinity)
             return base;
@@ -123,12 +140,14 @@ static uint64_t find_redistributor(void)
 
 void amp_wait_for_start(void)
 {
+    /* 1. 初始化当前核心的诊断信息。 */
+    /* 2. 等待启动握手条件满足后继续。 */
+
     unsigned int i;
-    volatile uint64_t *words =
-        (volatile uint64_t *)(uintptr_t)info;
+    volatile uint64_t *words = (volatile uint64_t *)(uintptr_t)info;
 
     __asm__ volatile("msr daifset, #2" ::: "memory");
-    
+
     amp_bus_handoff_clear();
 
     for (i = 0; i < sizeof(*info) / sizeof(uint64_t); i++)
@@ -155,6 +174,10 @@ void amp_wait_for_start(void)
  */
 void amp_setup_tick(void)
 {
+    /* 1. 计算系统 Tick 周期并配置本核中断接口。 */
+    /* 2. 设置定时器触发值并使能 Tick 中断。 */
+    /* 3. 记录配置结果供启动诊断使用。 */
+
     uint64_t base, sgi, sre, frequency;
     uint32_t value;
 
@@ -206,9 +229,8 @@ void amp_setup_tick(void)
     value = read32(sgi + 0xC04);
     write32(sgi + 0xC04, value & ~(2U << 28));
 
-    *(volatile uint8_t *)(uintptr_t)(sgi + 0x400 + TIMER_INTID)
-        = (uint8_t)(portLOWEST_USABLE_INTERRUPT_PRIORITY
-                    << portPRIORITY_SHIFT);
+    *(volatile uint8_t *)(uintptr_t)(sgi + 0x400 + TIMER_INTID) =
+        (uint8_t)(portLOWEST_USABLE_INTERRUPT_PRIORITY << portPRIORITY_SHIFT);
 
     write32(sgi + 0x280, TIMER_MASK); /* Clear pending */
     write32(sgi + 0x380, TIMER_MASK); /* Clear active */
@@ -257,8 +279,7 @@ void amp_setup_tick(void)
 
     info->stage = 4;
 
-    WRITE_SYS(cntp_cval_el0,
-              READ_SYS(cntpct_el0) + timer_period);
+    WRITE_SYS(cntp_cval_el0, READ_SYS(cntpct_el0) + timer_period);
     WRITE_SYS(cntp_ctl_el0, 1);
     barrier();
 
@@ -277,6 +298,9 @@ void amp_setup_tick(void)
  */
 void amp_clear_tick(void)
 {
+    /* 1. 更新系统定时器下一次触发值。 */
+    /* 2. 维护 Tick 中断诊断记录。 */
+
     uint64_t now = READ_SYS(cntpct_el0);
 
     WRITE_SYS(cntp_cval_el0, now + timer_period);
@@ -294,6 +318,10 @@ void amp_clear_tick(void)
  */
 void vApplicationIRQHandler(uint64_t iar)
 {
+    /* 1. 读取中断号并区分 Tick 和外设中断。 */
+    /* 2. 处理 Tick 或分发已注册的总线回调。 */
+    /* 3. 完成中断应答并更新诊断信息。 */
+
     uint32_t intid = (uint32_t)(iar & 0xFFFFFFU);
 
     info->last_intid = intid;

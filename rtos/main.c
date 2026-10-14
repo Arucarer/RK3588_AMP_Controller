@@ -1,53 +1,60 @@
-#include <stdint.h>
+#include <stdint.h> /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
 
-#include "shared_memory.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "irq_timer.h"
-#include "control_task.h"
-#include "monitor_task.h"
-#include "bus_task.h"
+#include "shared_memory.h" /* 引入 RTOS 共享内存 IPC 初始化及任务入口 */
+#include "FreeRTOS.h"      /* 引入 FreeRTOS 内核类型、配置及基础接口 */
+#include "task.h"          /* 引入 FreeRTOS 任务、延时及调度接口 */
+#include "irq_timer.h"     /* 引入系统 Tick 定时器及中断接口 */
+#include "control_task.h"  /* 引入 LED 控制命令、结果及任务接口 */
+#include "monitor_task.h"  /* 引入任务心跳、故障位及健康快照接口 */
+#include "bus_task.h"      /* 引入总线命令、结果及任务队列接口 */
 
-#define AMP_BOOT_MAGIC      0xA55A55A55AA55AA5ULL
-#define AMP_BOOT_FLAG_ADDR  0x20FE0000ULL
+#define AMP_BOOT_MAGIC 0xA55A55A55AA55AA5ULL /* 启动握手记录的有效标记，数据写好后发布 */
+#define AMP_BOOT_FLAG_ADDR 0x20FE0000ULL /* 启动握手记录的共享内存物理地址 */
 
-#define RTOS_INFO_ADDR      0x20FE0300ULL
-#define RTOS_INFO_MAGIC     0x4652544F53303031ULL
+#define RTOS_INFO_ADDR 0x20FE0300ULL /* RTOS 运行诊断记录的共享内存物理地址 */
+#define RTOS_INFO_MAGIC 0x4652544F53303031ULL /* RTOS 运行诊断记录的有效标记 */
 
+/* Linux 可读取的 RTOS 启动握手记录。 */
 typedef struct {
-    uint64_t magic;
-    uint64_t current_el;
-    uint64_t mpidr;
-    uint64_t stage;
+    uint64_t magic;      /* 启动记录有效标记，取 AMP_BOOT_MAGIC */
+    uint64_t current_el; /* RTOS 启动时的异常级别编号 */
+    uint64_t mpidr;      /* 启动核心的 MPIDR_EL1 亲和标识 */
+    uint64_t stage;      /* 启动握手阶段标记 */
 } AMPBootInfo;
 
+/* RTOS 调度及失败诊断共享记录，保留固定字段偏移供 Linux 读取。 */
 typedef struct {
-    uint64_t magic;          /* +0x00 */
-    uint64_t stage;          /* +0x08 */
-    uint64_t error;          /* +0x10 */
-    uint64_t task_a_count;   /* +0x18 */
-    uint64_t task_b_count;   /* +0x20 */
-    uint64_t task_a_tick;    /* +0x28 */
-    uint64_t task_b_tick;    /* +0x30 */
-    uint64_t assert_line;    /* +0x38 */
-    uint64_t assert_file;    /* +0x40: firmware string address */
-    uint64_t fault_task;     /* +0x48: task handle */
-    uint64_t fault_name;     /* +0x50: task name address */
+    uint64_t magic;        /* +0x00：诊断记录有效标记，取 RTOS_INFO_MAGIC */
+    uint64_t stage;        /* +0x08：RTOS 初始化及任务运行阶段 */
+    uint64_t error;        /* +0x10：停止原因码，具体含义见 rtos_stop 上方说明 */
+    uint64_t task_a_count; /* +0x18：诊断任务 A 的累计循环次数 */
+    uint64_t task_b_count; /* +0x20：诊断任务 B 的累计循环次数 */
+    uint64_t task_a_tick;  /* +0x28：诊断任务 A 最近运行时的系统 Tick */
+    uint64_t task_b_tick;  /* +0x30：诊断任务 B 最近运行时的系统 Tick */
+    uint64_t assert_line;  /* +0x38：断言失败的源文件行号 */
+    uint64_t assert_file;  /* +0x40：断言源文件名字符串在固件中的地址 */
+    uint64_t fault_task;   /* +0x48：发生栈溢出的任务句柄 */
+    uint64_t fault_name;   /* +0x50：发生栈溢出的任务名字符串地址 */
 } RTOSInfo;
 
 static volatile AMPBootInfo *const boot_info =
-    (volatile AMPBootInfo *)(uintptr_t)AMP_BOOT_FLAG_ADDR;
+    (volatile AMPBootInfo *)(uintptr_t)AMP_BOOT_FLAG_ADDR; /* boot_info：启动握手信息共享区 */
 
 static volatile RTOSInfo *const rtos_info =
-    (volatile RTOSInfo *)(uintptr_t)RTOS_INFO_ADDR;
+    (volatile RTOSInfo *)(uintptr_t)RTOS_INFO_ADDR; /* rtos_info：RTOS 运行信息共享区 */
 
 static inline void barrier(void)
 {
+    /* 1. 执行内存屏障，保证共享数据与状态标志的访问顺序。 */
+
     __asm__ volatile("dsb sy\nisb" ::: "memory");
 }
 
 static inline uint64_t read_current_el(void)
 {
+    /* 1. 读取 CurrentEL 系统寄存器。 */
+    /* 2. 提取异常级别字段，返回 EL 编号。 */
+
     uint64_t value;
 
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(value));
@@ -56,6 +63,8 @@ static inline uint64_t read_current_el(void)
 
 static inline uint64_t read_mpidr(void)
 {
+    /* 1. 读取 MPIDR_EL1，返回当前 CPU 的亲和标识。 */
+
     uint64_t value;
 
     __asm__ volatile("mrs %0, MPIDR_EL1" : "=r"(value));
@@ -64,9 +73,12 @@ static inline uint64_t read_mpidr(void)
 
 static void initialise_records(void)
 {
+    /* 1. 清除启动魔数，记录当前异常级别、CPU 标识与启动阶段。 */
+    /* 2. 通过屏障发布启动握手记录。 */
+    /* 3. 清零 RTOS 诊断区，再写入初始阶段和有效魔数。 */
+
     unsigned int i;
-    volatile uint64_t *words =
-        (volatile uint64_t *)(uintptr_t)RTOS_INFO_ADDR;
+    volatile uint64_t *words = (volatile uint64_t *)(uintptr_t)RTOS_INFO_ADDR;
 
     boot_info->magic = 0;
     barrier();
@@ -97,11 +109,13 @@ static void initialise_records(void)
  */
 static __attribute__((noreturn)) void rtos_stop(uint64_t error)
 {
+    /* 1. 屏蔽异常并关闭系统定时器。 */
+    /* 2. 保存错误码，通过屏障发布后永久等待。 */
+
     uint64_t timer_disabled = 0;
 
     __asm__ volatile("msr daifset, #0xf" ::: "memory");
-    __asm__ volatile("msr cntp_ctl_el0, %0"
-                     :: "r"(timer_disabled) : "memory");
+    __asm__ volatile("msr cntp_ctl_el0, %0" ::"r"(timer_disabled) : "memory");
 
     rtos_info->error = error;
     barrier();
@@ -112,6 +126,9 @@ static __attribute__((noreturn)) void rtos_stop(uint64_t error)
 
 void amp_assert_failed(const char *file, unsigned int line)
 {
+    /* 1. 屏蔽异常，保存断言文件地址与行号。 */
+    /* 2. 使用断言错误码进入停止路径。 */
+
     __asm__ volatile("msr daifset, #0xf" ::: "memory");
 
     rtos_info->assert_file = (uint64_t)(uintptr_t)file;
@@ -122,11 +139,16 @@ void amp_assert_failed(const char *file, unsigned int line)
 
 void vApplicationMallocFailedHook(void)
 {
+    /* 1. 使用内存分配失败错误码进入停止路径。 */
+
     rtos_stop(2);
 }
 
 void vApplicationStackOverflowHook(TaskHandle_t task, char *name)
 {
+    /* 1. 屏蔽异常，保存发生栈溢出的任务句柄及名称地址。 */
+    /* 2. 使用栈溢出错误码进入停止路径。 */
+
     __asm__ volatile("msr daifset, #0xf" ::: "memory");
 
     rtos_info->fault_task = (uint64_t)(uintptr_t)task;
@@ -137,6 +159,9 @@ void vApplicationStackOverflowHook(TaskHandle_t task, char *name)
 
 static void task_a(void *argument)
 {
+    /* 1. 周期更新本任务运行计数。 */
+    /* 2. 延时让出 CPU，供调度与诊断观察。 */
+
     (void)argument;
 
     for (;;) {
@@ -151,6 +176,9 @@ static void task_a(void *argument)
 
 static void task_b(void *argument)
 {
+    /* 1. 周期更新本任务运行计数。 */
+    /* 2. 延时让出 CPU，供调度与诊断观察。 */
+
     (void)argument;
 
     for (;;) {
@@ -165,6 +193,10 @@ static void task_b(void *argument)
 
 void amp_main(void)
 {
+    /* 1. 初始化诊断记录并核对启动环境。 */
+    /* 2. 初始化 IPC、监控及业务任务。 */
+    /* 3. 启动 FreeRTOS 调度器，意外返回时进入停止路径。 */
+
     BaseType_t result;
 
     initialise_records();
@@ -180,7 +212,7 @@ void amp_main(void)
 
     if (monitor_init() != 0)
         rtos_stop(4);
-        
+
     amp_ipc_init();
     /*
     * 在调度器启动前创建控制任务。
@@ -195,32 +227,17 @@ void amp_main(void)
      * Stack depth is in StackType_t units:
      * 512 entries = 4096 bytes on this AArch64 Port.
      */
-    result = xTaskCreate(task_a,
-                         "TaskA",
-                         configMINIMAL_STACK_SIZE,
-                         NULL,
-                         1,
-                         NULL);
+    result = xTaskCreate(task_a, "TaskA", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
     if (result != pdPASS)
         rtos_stop(4);
 
-    result = xTaskCreate(task_b,
-                         "TaskB",
-                         configMINIMAL_STACK_SIZE,
-                         NULL,
-                         1,
-                         NULL);
+    result = xTaskCreate(task_b, "TaskB", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 
     if (result != pdPASS)
         rtos_stop(4);
 
-    result = xTaskCreate(amp_ipc_task,
-                        "IPC",
-                        configMINIMAL_STACK_SIZE,
-                        NULL,
-                        2,
-                        NULL);
+    result = xTaskCreate(amp_ipc_task, "IPC", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
 
     if (result != pdPASS)
         rtos_stop(4);
@@ -235,15 +252,15 @@ void amp_main(void)
     rtos_stop(5);
 }
 
-
 /*
  * Snapshot CPU-local state from the RTOS core.
  * No FreeRTOS API calls and no blocking operations.
  */
 void vApplicationIdleHook(void)
 {
-    volatile uint64_t *d =
-        (volatile uint64_t *)(uintptr_t)0x20FE0400ULL;
+    /* 1. 在空闲任务中更新运行记录，供外部诊断观察。 */
+
+    volatile uint64_t *d = (volatile uint64_t *)(uintptr_t)0x20FE0400ULL;
     uint64_t value;
 
     __asm__ volatile("mrs %0, DAIF" : "=r"(value));

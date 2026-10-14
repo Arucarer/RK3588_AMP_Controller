@@ -21,10 +21,10 @@ import argparse
 import json
 from pathlib import Path
 
-SECTOR_BYTES = 512
-ALIGNMENT = 2048
-DISK_SECTORS = 120832000
-LAST_USABLE = 120831966
+SECTOR_BYTES = 512  # SECTOR_BYTES：单个磁盘扇区的字节数
+ALIGNMENT = 2048  # ALIGNMENT：分区起始位置的扇区对齐粒度
+DISK_SECTORS = 120832000  # DISK_SECTORS：候选布局使用的磁盘总扇区数
+LAST_USABLE = 120831966  # LAST_USABLE：GPT 最后一个可用扇区编号
 
 CURRENT = [
     (1, "uboot", 16384, 8192),
@@ -35,10 +35,11 @@ CURRENT = [
     (6, "rootfs", 491520, 29360128),
     (7, "oem", 29851648, 262144),
     (8, "userdata", 30113792, 90718175),
-]
+]  # CURRENT：生成方案所依据的现有分区布局
 
 
 def partition(number, name, start, sectors):
+    # 1. 组装并返回包含 "number", "name", "start_sector", "sectors", "end_sector", "bytes" 的记录。
     return {
         "number": number,
         "name": name,
@@ -50,6 +51,7 @@ def partition(number, name, start, sectors):
 
 
 def main():
+    # 1. 建立命令行参数解析器，保存到 parser。
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -62,33 +64,40 @@ def main():
         (12, "abmeta", 8192),
     ]
 
+    # 2. 调用 sum，保存到 total_new。
     total_new = sum(item[2] for item in additions)
     aligned_end = ((LAST_USABLE + 1) // ALIGNMENT) * ALIGNMENT
     new_start = aligned_end - total_new
 
+    # 3. 设置 userdata_start，供后续逻辑使用。
     userdata_start = CURRENT[-1][2]
     userdata_sectors = new_start - userdata_start
 
+    # 4. 检查条件；不满足要求时报告“无法生成对齐且有效的候选布局”。
     if userdata_sectors <= 0 or new_start % ALIGNMENT:
         raise SystemExit("无法生成对齐且有效的候选布局")
 
+    # 5. 调用 partition，保存到 proposed。
     proposed = [partition(*item) for item in CURRENT[:-1]]
-    proposed.append(partition(
-        8, "userdata", userdata_start, userdata_sectors
-    ))
+    proposed.append(partition(8, "userdata", userdata_start, userdata_sectors))
 
+    # 6. 设置 cursor，供后续逻辑使用。
     cursor = new_start
+    # 7. 遍历 additions，逐项处理 number, name, sectors。
     for number, name, sectors in additions:
         proposed.append(partition(number, name, cursor, sectors))
         cursor += sectors
 
+    # 8. 遍历 zip(proposed, proposed[1:])，逐项处理 previous, following。
     for previous, following in zip(proposed, proposed[1:]):
         if previous["end_sector"] >= following["start_sector"]:
             raise SystemExit("候选分区存在重叠")
 
+    # 9. 检查条件；不满足要求时报告“候选分区超出可用范围”。
     if proposed[-1]["end_sector"] > LAST_USABLE:
         raise SystemExit("候选分区超出可用范围")
 
+    # 10. 调用 partition，保存到 plan。
     plan = {
         "status": "DRAFT_NOT_EXECUTABLE",
         "board": "ATK-DLRK3588B",
@@ -96,9 +105,7 @@ def main():
         "sector_bytes": SECTOR_BYTES,
         "disk_sectors": DISK_SECTORS,
         "last_usable_sector": LAST_USABLE,
-        "expected_current_partitions": [
-            partition(*item) for item in CURRENT
-        ],
+        "expected_current_partitions": [partition(*item) for item in CURRENT],
         "proposed_partitions": proposed,
         "slots": {
             "a": {"boot": "boot", "rootfs": "rootfs", "amp": "amp"},
@@ -123,6 +130,7 @@ def main():
         ],
     }
 
+    # 11. 构造文件系统路径，保存到 output。
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -131,10 +139,11 @@ def main():
         json.dump(plan, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
 
+    # 12. 输出执行结果或诊断信息。
     print(f"候选方案已保存：{output}")
-    print("userdata 候选容量："
-          f"{userdata_sectors * SECTOR_BYTES / (1024 ** 3):.3f} GiB")
+    print("userdata 候选容量：" f"{userdata_sectors * SECTOR_BYTES / (1024 ** 3):.3f} GiB")
 
+    # 13. 遍历 proposed，逐项处理 item。
     for item in proposed:
         print(
             f'{item["number"]:2d} {item["name"]:10s} '
@@ -143,6 +152,7 @@ def main():
             f'sectors={item["sectors"]:9d}'
         )
 
+    # 14. 输出执行结果或诊断信息。
     print("仅生成方案；未缩容、未修改 GPT、未刷写、未启用 A/B。")
 
 

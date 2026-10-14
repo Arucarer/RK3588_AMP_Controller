@@ -1,44 +1,52 @@
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L /* 启用 POSIX.1-2008 接口声明，如单调时钟和纳秒休眠 */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/file.h>
-#include <sys/mman.h>
-#include <time.h>
-#include <unistd.h>
+#include <errno.h>    /* 引入 errno 和系统调用错误码 */
+#include <fcntl.h>    /* 引入文件打开选项与文件控制接口 */
+#include <inttypes.h> /* 引入固定宽度整数的 printf 格式宏 */
+#include <stdint.h>   /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
+#include <stdio.h>    /* 引入标准输入输出接口，如 printf、fprintf */
+#include <stdlib.h>   /* 引入数值转换、内存分配及进程退出等标准库接口 */
+#include <string.h>   /* 引入内存复制、清零及字符串处理接口 */
+#include <sys/file.h> /* 引入 flock 文件锁接口 */
+#include <sys/mman.h> /* 引入 mmap、munmap 及内存映射选项 */
+#include <time.h>     /* 引入时钟读取、时间结构及休眠接口 */
+#include <unistd.h>   /* 引入 POSIX 文件读写、关闭及其他系统接口 */
 
-#include "../common/amp_protocol.h"
+#include "../common/amp_protocol.h" /* 引入旧版共享内存加法测试协议 */
 
-#if !defined(__aarch64__)
+#if !defined(__aarch64__) /* 非 AArch64 编译目标进入报错分支 */
 #error "Build this program for the RK3588 AArch64 Linux target."
-#endif
+#endif /* 结束 !defined(__aarch64__) 对应的条件编译区段 */
 
-#define TIMEOUT_MS 2000ULL
+#define TIMEOUT_MS 2000ULL /* IPC 测试的等待超时，单位 ms */
 
 static inline void ipc_barrier(void)
 {
+    /* 1. 执行内存屏障，保证共享数据与状态标志的访问顺序。 */
+
     __asm__ volatile("dmb sy" ::: "memory");
 }
 
 static int monotonic_ms(uint64_t *value)
 {
+    /* 1. 读取单调时钟，避免系统时间调整影响超时。 */
+    /* 2. 换算为接口使用的毫秒或纳秒单位。 */
+
     struct timespec ts;
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return -1;
 
-    *value = (uint64_t)ts.tv_sec * 1000ULL +
-             (uint64_t)ts.tv_nsec / 1000000ULL;
+    *value = (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
     return 0;
 }
 
 static int parse_u32(const char *text, uint32_t *value)
 {
+    /* 1. 把文本转换为整数。 */
+    /* 2. 检查解析终点、溢出及允许范围。 */
+    /* 3. 返回合法数值，非法输入进入错误路径。 */
+
     char *end;
     unsigned long long number;
 
@@ -57,6 +65,10 @@ static int parse_u32(const char *text, uint32_t *value)
 
 int main(int argc, char **argv)
 {
+    /* 1. 解析测试选项并映射共享内存。 */
+    /* 2. 构造消息执行发送、接收及超时检查。 */
+    /* 3. 输出结果并释放映射和文件资源。 */
+
     int lock_fd = -1;
     int mem_fd = -1;
     int exit_code = EXIT_FAILURE;
@@ -66,14 +78,9 @@ int main(int argc, char **argv)
     uint32_t request_seq, response_seq, seq;
     uint32_t status, result;
     uint64_t begin_ms, now_ms;
-    const struct timespec poll_delay = {
-        .tv_sec = 0,
-        .tv_nsec = 1000000
-    };
+    const struct timespec poll_delay = {.tv_sec = 0, .tv_nsec = 1000000};
 
-    if (argc != 3 ||
-        parse_u32(argv[1], &arg0) != 0 ||
-        parse_u32(argv[2], &arg1) != 0) {
+    if (argc != 3 || parse_u32(argv[1], &arg0) != 0 || parse_u32(argv[2], &arg1) != 0) {
         fprintf(stderr,
                 "Usage: %s <uint32 arg0> <uint32 arg1>\n"
                 "Example: %s 123 456\n",
@@ -88,9 +95,7 @@ int main(int argc, char **argv)
      * All Linux clients using this protocol must take this lock.
      * Do not unlink the lock file when exiting.
      */
-    lock_fd = open("/run/amp-ipc-test.lock",
-                   O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
-                   0600);
+    lock_fd = open("/run/amp-ipc-test.lock", O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock_fd < 0) {
         perror("open lock");
         goto cleanup;
@@ -107,11 +112,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    mapping = mmap(NULL,
-                   AMP_IPC_MAP_SIZE,
-                   PROT_READ | PROT_WRITE,
-                   MAP_SHARED,
-                   mem_fd,
+    mapping = mmap(NULL, AMP_IPC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd,
                    (off_t)AMP_IPC_PHYS_ADDR);
     if (mapping == MAP_FAILED) {
         perror("mmap");
@@ -131,8 +132,7 @@ int main(int argc, char **argv)
     ipc_barrier();
 
     if (ipc->version != AMP_IPC_VERSION) {
-        fprintf(stderr, "IPC version mismatch: %" PRIu32 "\n",
-                ipc->version);
+        fprintf(stderr, "IPC version mismatch: %" PRIu32 "\n", ipc->version);
         goto cleanup;
     }
 
@@ -141,8 +141,7 @@ int main(int argc, char **argv)
 
     if (request_seq != response_seq) {
         fprintf(stderr,
-                "Previous request is still pending: request=%" PRIu32
-                ", response=%" PRIu32 "\n",
+                "Previous request is still pending: request=%" PRIu32 ", response=%" PRIu32 "\n",
                 request_seq, response_seq);
         goto cleanup;
     }
@@ -181,10 +180,8 @@ int main(int argc, char **argv)
         }
 
         if (now_ms - begin_ms >= TIMEOUT_MS) {
-            fprintf(stderr,
-                    "Timeout: request=%" PRIu32
-                    ", response=%" PRIu32 "\n",
-                    seq, ipc->response_seq);
+            fprintf(stderr, "Timeout: request=%" PRIu32 ", response=%" PRIu32 "\n", seq,
+                    ipc->response_seq);
             goto cleanup;
         }
 
@@ -199,15 +196,14 @@ int main(int argc, char **argv)
 
     if (status != AMP_STATUS_OK || result != expected) {
         fprintf(stderr,
-                "FAIL: seq=%" PRIu32 ", status=%" PRIu32
-                ", result=%" PRIu32 ", expected=%" PRIu32 "\n",
+                "FAIL: seq=%" PRIu32 ", status=%" PRIu32 ", result=%" PRIu32 ", expected=%" PRIu32
+                "\n",
                 seq, status, result, expected);
         goto cleanup;
     }
 
-    printf("PASS: seq=%" PRIu32
-           ", %" PRIu32 " + %" PRIu32 " = %" PRIu32
-           ", elapsed=%" PRIu64 " ms\n",
+    printf("PASS: seq=%" PRIu32 ", %" PRIu32 " + %" PRIu32 " = %" PRIu32 ", elapsed=%" PRIu64
+           " ms\n",
            seq, arg0, arg1, result, now_ms - begin_ms);
 
     exit_code = EXIT_SUCCESS;

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-PROJECT = Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[1]  # PROJECT：项目根目录，用于定位被测模块
 sys.path.insert(0, str(PROJECT / "tools"))
 
 import ab_migrate_device as migration
@@ -15,154 +15,154 @@ import ab_migrate_device as migration
 
 class DeviceEntryTests(unittest.TestCase):
     def setUp(self):
+        # 1. 创建测试临时目录，保存到 self.temp。
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.plan = json.loads(
-            (PROJECT / "docs/ab-layout-draft-v1.json").read_text()
-        )
+        self.plan = json.loads((PROJECT / "docs/ab-layout-draft-v1.json").read_text())
 
     def make_sysfs(self):
+        # 1. 设置 root，供后续逻辑使用。
         root = self.root / "disk"
         root.mkdir()
+        # 2. 遍历 self.plan["proposed_partitions"]，逐项处理 part。
         for part in self.plan["proposed_partitions"]:
             child = root / ("mmcblk0p" + str(part["number"]))
             child.mkdir()
             (child / "partition").write_text(str(part["number"]))
             (child / "start").write_text(str(part["start_sector"]))
             (child / "size").write_text(str(part["sectors"]))
+        # 3. 返回 root。
         return root
 
     def test_commit_gate_rejects_before_device_access(self):
+        # 1. 设置 argv，供后续逻辑使用。
         argv = [
             "ab_migrate_device.py",
-            "--plan", "unused-plan",
-            "--gpt-backup", "unused-backup",
-            "--work-dir", "unused-work",
-            "--commit", "--backup-saved",
+            "--plan",
+            "unused-plan",
+            "--gpt-backup",
+            "unused-backup",
+            "--work-dir",
+            "unused-work",
+            "--commit",
+            "--backup-saved",
         ]
-        with patch.object(sys, "argv", argv), \
-             patch.object(migration.os, "geteuid", return_value=0), \
-             patch.object(migration, "ACTIVATE", False), \
-             patch.object(migration.shrink, "inspect") as inspect:
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
+        with patch.object(sys, "argv", argv), patch.object(
+            migration.os, "geteuid", return_value=0
+        ), patch.object(migration, "ACTIVATE", False), patch.object(
+            migration.shrink, "inspect"
+        ) as inspect:
             with self.assertRaisesRegex(RuntimeError, "开关关闭"):
                 migration.main()
             inspect.assert_not_called()
 
     def test_missing_backup_ack_rejects_before_device_access(self):
+        # 1. 设置 argv，供后续逻辑使用。
         argv = [
             "ab_migrate_device.py",
-            "--plan", "unused-plan",
-            "--gpt-backup", "unused-backup",
-            "--work-dir", "unused-work",
+            "--plan",
+            "unused-plan",
+            "--gpt-backup",
+            "unused-backup",
+            "--work-dir",
+            "unused-work",
             "--commit",
         ]
-        with patch.object(sys, "argv", argv), \
-             patch.object(migration.os, "geteuid", return_value=0), \
-             patch.object(migration, "ACTIVATE", True), \
-             patch.object(migration.shrink, "inspect") as inspect:
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
+        with patch.object(sys, "argv", argv), patch.object(
+            migration.os, "geteuid", return_value=0
+        ), patch.object(migration, "ACTIVATE", True), patch.object(
+            migration.shrink, "inspect"
+        ) as inspect:
             with self.assertRaisesRegex(RuntimeError, "备份"):
                 migration.main()
             inspect.assert_not_called()
 
     def test_oversized_filesystem_rejected(self):
-        partition_bytes = (
-            self.plan["proposed_partitions"][7]["sectors"] * 512
-        )
+        # 1. 设置 partition_bytes，供后续逻辑使用。
+        partition_bytes = self.plan["proposed_partitions"][7]["sectors"] * 512
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
         with patch.object(
-            migration.shrink, "filesystem_size",
-            return_value=(partition_bytes, 4096)
+            migration.shrink, "filesystem_size", return_value=(partition_bytes, 4096)
         ):
             with self.assertRaisesRegex(RuntimeError, "安全边界"):
-                migration.check_filesystem_fits(
-                    Path("/unused"), self.plan
-                )
+                migration.check_filesystem_fits(Path("/unused"), self.plan)
 
     def test_shrunk_filesystem_accepted(self):
-        partition_bytes = (
-            self.plan["proposed_partitions"][7]["sectors"] * 512
-        )
-        size = (
-            (partition_bytes - migration.shrink.MARGIN_BYTES) // 4096
-        ) * 4096
-        with patch.object(
-            migration.shrink, "filesystem_size",
-            return_value=(size, 4096)
-        ):
+        # 1. 设置 partition_bytes，供后续逻辑使用。
+        partition_bytes = self.plan["proposed_partitions"][7]["sectors"] * 512
+        size = ((partition_bytes - migration.shrink.MARGIN_BYTES) // 4096) * 4096
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
+        with patch.object(migration.shrink, "filesystem_size", return_value=(size, 4096)):
             self.assertEqual(
-                migration.check_filesystem_fits(
-                    Path("/unused"), self.plan
-                ),
+                migration.check_filesystem_fits(Path("/unused"), self.plan),
                 size,
             )
 
     def test_kernel_partition_ranges_verified(self):
+        # 1. 调用 self.make_sysfs，保存到 sysfs。
         sysfs = self.make_sysfs()
-        migration.check_kernel_partitions(
-            sysfs, self.plan["proposed_partitions"]
-        )
+        migration.check_kernel_partitions(sysfs, self.plan["proposed_partitions"])
 
+        # 2. 写入文本文件。
         (sysfs / "mmcblk0p9" / "start").write_text("123")
+        # 3. 在 预期异常检查 上下文中执行，退出时恢复或释放资源。
         with self.assertRaisesRegex(RuntimeError, "范围不匹配"):
-            migration.check_kernel_partitions(
-                sysfs, self.plan["proposed_partitions"]
-            )
+            migration.check_kernel_partitions(sysfs, self.plan["proposed_partitions"])
 
     def test_flush_order(self):
+        # 1. 设置 calls，供后续逻辑使用。
         calls = []
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
         with patch.object(
-            migration.os, "fsync",
-            side_effect=lambda fd: calls.append(("fsync", fd))
+            migration.os, "fsync", side_effect=lambda fd: calls.append(("fsync", fd))
         ), patch.object(
-            migration.fcntl, "ioctl",
-            side_effect=lambda fd, cmd: calls.append(("ioctl", fd, cmd))
+            migration.fcntl, "ioctl", side_effect=lambda fd, cmd: calls.append(("ioctl", fd, cmd))
         ):
             migration.flush_disk(123)
 
-        self.assertEqual(calls, [
-            ("fsync", 123),
-            ("ioctl", 123, migration.BLKFLSBUF),
-        ])
+        # 3. 断言实际值与预期值一致。
+        self.assertEqual(
+            calls,
+            [
+                ("fsync", 123),
+                ("ioctl", 123, migration.BLKFLSBUF),
+            ],
+        )
 
     def test_reread_success_checks_kernel_table(self):
+        # 1. 调用 self.make_sysfs，保存到 sysfs。
         sysfs = self.make_sysfs()
+        # 2. 在 测试替身 上下文中执行，退出时恢复或释放资源。
         with patch.object(migration.fcntl, "ioctl") as ioctl:
-            migration.reread_and_check(
-                123, sysfs, self.plan["proposed_partitions"]
-            )
+            migration.reread_and_check(123, sysfs, self.plan["proposed_partitions"])
             ioctl.assert_called_once_with(123, migration.BLKRRPART)
 
     def test_reread_ioctl_failure_not_retried(self):
+        # 1. 在 测试替身 上下文中执行，退出时恢复或释放资源。
         with patch.object(
-            migration.fcntl, "ioctl",
-            side_effect=OSError("injected BLKRRPART failure")
-        ) as ioctl, patch.object(
-            migration, "check_kernel_partitions"
-        ) as check:
+            migration.fcntl, "ioctl", side_effect=OSError("injected BLKRRPART failure")
+        ) as ioctl, patch.object(migration, "check_kernel_partitions") as check:
             with self.assertRaises(OSError):
-                migration.reread_and_check(
-                    123, self.root, self.plan["proposed_partitions"]
-                )
+                migration.reread_and_check(123, self.root, self.plan["proposed_partitions"])
             ioctl.assert_called_once()
             check.assert_not_called()
 
     def test_stale_kernel_table_times_out(self):
-        with patch.object(migration.fcntl, "ioctl"), \
-             patch.object(
-                 migration, "check_kernel_partitions",
-                 side_effect=RuntimeError("stale kernel partition table")
-             ), \
-             patch.object(
-                 migration.time, "monotonic", side_effect=[0, 6]
-             ), \
-             patch.object(migration.time, "sleep") as sleep:
+        # 1. 在 测试替身 上下文中执行，退出时恢复或释放资源。
+        with patch.object(migration.fcntl, "ioctl"), patch.object(
+            migration,
+            "check_kernel_partitions",
+            side_effect=RuntimeError("stale kernel partition table"),
+        ), patch.object(migration.time, "monotonic", side_effect=[0, 6]), patch.object(
+            migration.time, "sleep"
+        ) as sleep:
             with self.assertRaisesRegex(RuntimeError, "stale"):
-                migration.reread_and_check(
-                    123, self.root, self.plan["proposed_partitions"]
-                )
+                migration.reread_and_check(123, self.root, self.plan["proposed_partitions"])
             sleep.assert_not_called()
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-    

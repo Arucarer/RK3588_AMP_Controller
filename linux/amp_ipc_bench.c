@@ -15,34 +15,39 @@
  * 分位数采用 nearest-rank。
  */
 
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L /* 启用 POSIX.1-2008 接口声明，如单调时钟和纳秒休眠 */
 
-#include <errno.h>
-#include <inttypes.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#include <errno.h>    /* 引入 errno 和系统调用错误码 */
+#include <inttypes.h> /* 引入固定宽度整数的 printf 格式宏 */
+#include <stdint.h>   /* 引入固定宽度整数类型，如 uint32_t、uint64_t */
+#include <stdio.h>    /* 引入标准输入输出接口，如 printf、fprintf */
+#include <stdlib.h>   /* 引入数值转换、内存分配及进程退出等标准库接口 */
+#include <string.h>   /* 引入内存复制、清零及字符串处理接口 */
+#include <time.h>     /* 引入时钟读取、时间结构及休眠接口 */
 
-#include "amp_ipc.h"
+#include "amp_ipc.h" /* 引入 Linux IPC 客户端接口 */
 
-#define MAX_SAMPLES 100000U
+#define MAX_SAMPLES 100000U /* 延迟测量允许的最大样本数 */
 
 static int clock_ns(uint64_t *value)
 {
+    /* 1. 读取单调时钟，避免系统时间调整影响超时。 */
+    /* 2. 换算为接口使用的毫秒或纳秒单位。 */
+
     struct timespec ts;
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return -1;
 
-    *value = (uint64_t)ts.tv_sec * UINT64_C(1000000000) +
-             (uint64_t)ts.tv_nsec;
+    *value = (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
     return 0;
 }
 
 static int compare_u64(const void *left, const void *right)
 {
+    /* 1. 比较两个无符号 64 位样本。 */
+    /* 2. 返回排序关系，供 qsort 使用。 */
+
     uint64_t a = *(const uint64_t *)left;
     uint64_t b = *(const uint64_t *)right;
 
@@ -51,6 +56,10 @@ static int compare_u64(const void *left, const void *right)
 
 static int parse_count(const char *text, uint32_t *count)
 {
+    /* 1. 把文本转换为整数。 */
+    /* 2. 检查解析终点、溢出及允许范围。 */
+    /* 3. 返回合法数值，非法输入进入错误路径。 */
+
     char *end;
     const char *p;
     unsigned long value;
@@ -73,10 +82,11 @@ static int parse_count(const char *text, uint32_t *count)
     return 0;
 }
 
-static uint64_t percentile(const uint64_t *sorted,
-                           uint32_t count,
-                           uint32_t percent)
+static uint64_t percentile(const uint64_t *sorted, uint32_t count, uint32_t percent)
 {
+    /* 1. 根据样本数计算分位位置。 */
+    /* 2. 限制索引范围并返回对应的已排序样本。 */
+
     size_t rank = ((size_t)count * percent + 99U) / 100U;
 
     return sorted[rank - 1U];
@@ -84,6 +94,10 @@ static uint64_t percentile(const uint64_t *sorted,
 
 int main(int argc, char **argv)
 {
+    /* 1. 解析样本数等测量参数并建立 IPC 连接。 */
+    /* 2. 逐次记录请求往返延迟及错误。 */
+    /* 3. 排序样本并输出分位数和统计结果。 */
+
     AMPClient client;
     AMPMessage response;
     uint64_t *samples;
@@ -95,8 +109,7 @@ int main(int argc, char **argv)
     int exit_code = EXIT_SUCCESS;
 
     if (argc != 2 || parse_count(argv[1], &requested) != 0) {
-        fprintf(stderr, "Usage: %s <count:1..%u>\n",
-                argv[0], MAX_SAMPLES);
+        fprintf(stderr, "Usage: %s <count:1..%u>\n", argv[0], MAX_SAMPLES);
         return EXIT_FAILURE;
     }
 
@@ -116,10 +129,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    fprintf(stderr,
-            "session=%016" PRIx64
-            " requested=%" PRIu32
-            " payload_bytes=16 warmup=0\n",
+    fprintf(stderr, "session=%016" PRIx64 " requested=%" PRIu32 " payload_bytes=16 warmup=0\n",
             client.session, requested);
 
     printf("sample,sequence,result,rtt_ns,remote_status\n");
@@ -147,42 +157,33 @@ int main(int argc, char **argv)
 
         ++attempted;
 
-        call_result = amp_client_call(
-            &client, AMP_OP_PING,
-            payload, sizeof(payload), &response);
+        call_result = amp_client_call(&client, AMP_OP_PING, payload, sizeof(payload), &response);
         call_errno = errno;
 
         if (clock_ns(&end) != 0) {
             ++failed;
             perror("clock_gettime");
-            printf("%" PRIu32 ",%" PRIu32
-                   ",CLOCK_ERROR,,\n",
-                   i + 1U, client.sequence);
+            printf("%" PRIu32 ",%" PRIu32 ",CLOCK_ERROR,,\n", i + 1U, client.sequence);
             exit_code = EXIT_FAILURE;
             break;
         }
 
         if (call_result != 0) {
             ++failed;
-            printf("%" PRIu32 ",%" PRIu32
-                   ",CALL_ERROR,%" PRIu64 ",\n",
-                   i + 1U, client.sequence, end - begin);
-            fprintf(stderr, "Request failed: %s\n",
-                    strerror(call_errno));
+            printf("%" PRIu32 ",%" PRIu32 ",CALL_ERROR,%" PRIu64 ",\n", i + 1U, client.sequence,
+                   end - begin);
+            fprintf(stderr, "Request failed: %s\n", strerror(call_errno));
             exit_code = EXIT_FAILURE;
             break;
         }
 
-        valid = response.status == AMP_RESULT_OK &&
-                response.payload_length == sizeof(payload) &&
+        valid = response.status == AMP_RESULT_OK && response.payload_length == sizeof(payload) &&
                 memcmp(response.payload, payload, sizeof(payload)) == 0;
 
         if (!valid) {
             ++failed;
-            printf("%" PRIu32 ",%" PRIu32
-                   ",BAD_RESPONSE,%" PRIu64 ",%" PRIu32 "\n",
-                   i + 1U, response.sequence,
-                   end - begin, response.status);
+            printf("%" PRIu32 ",%" PRIu32 ",BAD_RESPONSE,%" PRIu64 ",%" PRIu32 "\n", i + 1U,
+                   response.sequence, end - begin, response.status);
             exit_code = EXIT_FAILURE;
             break;
         }
@@ -190,9 +191,7 @@ int main(int argc, char **argv)
         samples[success++] = end - begin;
         sum += (long double)(end - begin);
 
-        printf("%" PRIu32 ",%" PRIu32
-               ",OK,%" PRIu64 ",%" PRIu32 "\n",
-               i + 1U, response.sequence,
+        printf("%" PRIu32 ",%" PRIu32 ",OK,%" PRIu64 ",%" PRIu32 "\n", i + 1U, response.sequence,
                end - begin, response.status);
 
         if (ferror(stdout)) {
@@ -205,12 +204,9 @@ int main(int argc, char **argv)
     amp_client_close(&client);
 
     fprintf(stderr,
-            "attempted=%" PRIu32
-            " success=%" PRIu32
-            " failed=%" PRIu32
-            " unattempted=%" PRIu32 "\n",
-            attempted, success, failed,
-            requested - attempted);
+            "attempted=%" PRIu32 " success=%" PRIu32 " failed=%" PRIu32 " unattempted=%" PRIu32
+            "\n",
+            attempted, success, failed, requested - attempted);
 
     if (success != 0) {
         qsort(samples, success, sizeof(*samples), compare_u64);
@@ -222,8 +218,7 @@ int main(int argc, char **argv)
                 "p95_us=%.3Lf\n"
                 "p99_us=%.3Lf\n"
                 "max_us=%.3Lf\n",
-                (long double)samples[0] / 1000.0L,
-                sum / success / 1000.0L,
+                (long double)samples[0] / 1000.0L, sum / success / 1000.0L,
                 (long double)percentile(samples, success, 95) / 1000.0L,
                 (long double)percentile(samples, success, 99) / 1000.0L,
                 (long double)samples[success - 1U] / 1000.0L);
