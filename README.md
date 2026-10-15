@@ -1,1137 +1,211 @@
-# RK3588 AMP Controller
+# RK3588 Linux + FreeRTOS 异构伺服控制平台
 
-基于 Rockchip RK3588 的 Linux + FreeRTOS AMP 异构多核实时控制系统。
+## 项目简介
 
-本项目面向车载域控制器、工业控制器、机器人控制器以及边缘实时控制等场景，研究并实现 RK3588 平台下的 **AMP（Asymmetric Multiprocessing，非对称多处理）双系统架构**。
+本项目基于 RK3588 构建 Linux 与 FreeRTOS 协同运行的 AMP 异构控制系统，并在已有系统基础上，逐步扩展有传感器 FOC、单轴伺服控制和分布式多轴协调功能。
 
-RK3588 采用 8 核 ARM64 异构 CPU 架构，包括：
+项目希望探索：能否让应用处理器中的一个独立 Cortex-A55 核承担电机控制计算，而由其他核心继续运行 Linux，处理界面、网络、存储和系统升级。在这一架构中，FreeRTOS 不只是执行简单的控制命令，而是计划直接完成 FOC 矢量控制、SVPWM 调制及电流、速度、位置三级闭环，承担传统电机控制 MCU 的控制计算职责。
 
-* 4 × Cortex-A55
-* 4 × Cortex-A76
+目前，项目已经完成 Linux + FreeRTOS 分核启动、共享内存 IPC、基础控制任务、外设资源交接，以及签名 A/B 升级与启动健康确认。电机控制部分处于扩展开发阶段，尚未实现真实电机闭环运行。
 
-项目采用 Linux 与 FreeRTOS 分核运行的方式：Linux 继续保持 SMP 多核调度，负责网络、交互、数据显示以及复杂业务；单独划分一个 Cortex-A55 核运行 FreeRTOS，负责实时采集、实时控制和低延迟任务。
+因此，当前工程既是一个已经能够上机运行的 AMP 控制原型，也是后续伺服控制平台的软件基础。
 
-第一版计划将：
+## 为什么采用 Linux + FreeRTOS
 
-```text
-cpu_l3
-Cortex-A55
-MPIDR = 0x300
-```
-
-作为 FreeRTOS 独立运行核心。
-
----
-
-# 一、项目背景
-
-传统 Linux 系统虽然拥有完善的驱动、网络、文件系统和应用生态，但普通 Linux 并不能保证严格的实时响应。
-
-FreeRTOS 等 RTOS 则具有调度路径短、任务优先级明确、中断响应稳定等特点，适合传感器采集、电机控制、GPIO 中断、现场总线控制等实时任务。
-
-因此，本项目采用 AMP 架构，将 Linux 与 FreeRTOS 部署在不同 CPU 核心：
-
-```text
-                    RK3588
-
-        ┌─────────────────────────┐
-        │                         │
-        │      Cortex-A76/A55     │
-        │                         │
-        │     Debian Linux        │
-        │       SMP 系统           │
-        │                         │
-        │ 网络 / 显示 / 存储       │
-        │ 用户交互 / 上层业务       │
-        │                         │
-        └───────────┬─────────────┘
-                    │
-             IPC / Shared Memory
-             Mailbox / RPMsg
-                    │
-        ┌───────────▼─────────────┐
-        │                         │
-        │      Cortex-A55         │
-        │       cpu_l3            │
-        │     MPIDR 0x300         │
-        │                         │
-        │       FreeRTOS          │
-        │                         │
-        │  实时采集 / 实时控制     │
-        │  Timer / IRQ / 外设      │
-        │                         │
-        └─────────────────────────┘
-```
-
-这种设计能够将复杂 Linux 业务与实时控制任务进行 CPU、内存及外设资源隔离，降低两个系统之间的相互干扰。项目最终目标是实现 Linux 与 FreeRTOS 在不同 CPU 核心上的独立运行以及双向通信。
-
----
-
-# 二、项目目标
-
-本项目主要完成以下内容：
-
-1. 理解并实现 RK3588 AMP 异构多核运行架构。
-2. 保持 Linux SMP，多核继续运行 Linux。
-3. 将指定 Cortex-A55 核从 Linux CPU 拓扑中隔离。
-4. 在独立 Cortex-A55 核上运行 AArch64 FreeRTOS。
-5. 完成 FreeRTOS ARM64 BSP 适配。
-6. 实现 GICv3 中断控制。
-7. 使用 ARM Generic Timer 实现 FreeRTOS Tick。
-8. 实现 UART 调试输出。
-9. 划分 Linux / FreeRTOS 独立内存。
-10. 建立 Linux 与 FreeRTOS 共享内存通信。
-11. 在共享内存基础上进一步验证 Mailbox / RPMsg。
-12. FreeRTOS 完成传感器采集与实时控制。
-13. Linux 完成数据显示、用户交互和控制指令发送。
-14. 测试双系统通信延迟与长时间运行稳定性。
-
-最终形成：
-
-```text
-Linux 复杂业务
-        +
-FreeRTOS 实时控制
-        +
-CPU / Memory 隔离
-        +
-Shared Memory / RPMsg IPC
-```
-
-的 RK3588 异构双系统控制架构。
-
----
-
-# 三、系统总体架构
-
-最终目标系统为：
-
-```text
-RK3588 8 Core
-│
-├── Debian Linux
-│   │
-│   ├── Cortex-A76
-│   ├── Cortex-A76
-│   ├── Cortex-A76
-│   ├── Cortex-A76
-│   ├── Cortex-A55
-│   ├── Cortex-A55
-│   └── Cortex-A55
-│
-│       Linux SMP
-│
-│       ├── 网络通信
-│       ├── 数据显示
-│       ├── 用户交互
-│       ├── 日志记录
-│       └── 控制命令发送
-│
-└── FreeRTOS
-    │
-    └── Cortex-A55 cpu_l3
-        MPIDR = 0x300
-
-        ├── 实时传感器采集
-        ├── 风扇 / 执行器控制
-        ├── GICv3 IRQ
-        ├── Generic Timer
-        └── 实时任务调度
-```
-
-Linux 与 FreeRTOS 不依赖同一个操作系统调度器，两侧分别独立运行，通过共享内存、Mailbox 或 RPMsg 完成通信。
-
----
-
-# 四、AMP 启动架构
-
-项目使用 Rockchip SDK 提供的 AMP Framework，而不是简单通过手工启动从核。
-
-FreeRTOS 固件经过编译后生成：
-
-```text
-freertos.elf
-        ↓
-freertos.bin
-        ↓
-amp.its
-        ↓
-amp.img
-```
-
-U-Boot 加载 `amp.img` 后，根据 AMP FIT Image 中描述的 CPU、Load Address、Entry Address 等信息启动 FreeRTOS。
-
-目标启动链路：
-
-```text
-U-Boot
-  ↓
-amp.img
-  ↓
-Rockchip AMP Framework
-  ↓
-PSCI CPU_ON
-  ↓
-SMC
-  ↓
-BL31 / Trusted Firmware
-  ↓
-Cortex-A55 cpu_l3
-  ↓
-FreeRTOS
-```
-
-RK3588 AMP FIT Image 第一版规划：
-
-```text
-arch = arm64
-
-cpu = 0x300
-
-load = 0x08400000
-
-boot-on = 1
-```
-
-其中 `cpu = 0x300` 对应计划运行 FreeRTOS 的 `cpu_l3`。
-
----
-
-# 五、CPU 核心隔离
-
-项目不会关闭 Linux SMP。
-
-Linux 仍然运行于其余 CPU 核心，仅将一个 Cortex-A55 核从 Linux CPU 拓扑中移除。
-
-目标核心：
-
-```text
-cpu_l3
-
-Cortex-A55
-
-MPIDR = 0x300
-```
-
-设备树隔离思路：
-
-```text
-Linux CPU Topology
-
-cpu0
-cpu1
-cpu2
-cpu3
-cpu4
-cpu5
-cpu6
-cpu7
- │
- └── remove cpu_l3
-```
-
-最终形成：
-
-```text
-Linux
-7 Core
-SMP
-
-+
-
-FreeRTOS
-1 Core
-AMP
-```
-
-这与“关闭 Linux SMP，让 Linux 只运行在单核”的方式不同。本项目保留 Linux 的多核处理能力，只将实时任务需要的 CPU 独立出来。
-
----
-
-# 六、内存规划
-
-AMP 架构不仅需要 CPU 隔离，还必须进行物理内存隔离。
-
-如果 Linux 与 FreeRTOS 同时访问同一片普通内存，可能出现：
-
-```text
-内存覆盖
-Cache 不一致
-数据破坏
-随机崩溃
-```
-
-因此项目通过 Device Tree `reserved-memory` 与 FreeRTOS Linker Script 进行内存区域划分。
-
-当前第一版规划：
-
-```text
-AMP Shared Memory
-
-0x07800000
-Size: 4 MB
-```
-
-```text
-RPMsg
-
-0x07C00000
-Size: 4 MB
-```
-
-```text
-RPMsg DMA
-
-0x08000000
-Size: 1 MB
-```
-
-```text
-FreeRTOS
-
-0x08400000
-~
-0x093FFFFF
-
-Size: 16 MB
-```
-
-FreeRTOS 第一版：
-
-```text
-Link Address  = 0x08400000
-Load Address  = 0x08400000
-Entry Address = 0x08400000
-```
-
-Linux 不使用 FreeRTOS 独占区域，从而防止两个系统发生内存冲突。
-
----
-
-# 七、FreeRTOS BSP
-
-项目使用：
-
-```text
-FreeRTOS Kernel V10.5.1
-```
-
-ARM64 移植基础：
-
-```text
-portable/GCC/ARM_CA53_64_BIT_SRE
-```
-
-该 Port 使用 AArch64，并采用 GICv3 System Register Interface，作为 RK3588 Cortex-A55 FreeRTOS 移植基础。
-
-FreeRTOS BSP 主要包括：
-
-```text
-startup.S
-linker.ld
-
-FreeRTOSConfig.h
-
-uart.c
-uart.h
-
-gic.c
-gic.h
-
-timer.c
-timer.h
-
-main.c
-```
-
-各部分职责：
-
-`startup.S`
-
-负责 CPU 从 AMP 启动入口进入 FreeRTOS 前的底层初始化，包括：
-
-```text
-Stack
-BSS
-异常向量
-EL1运行环境
-C Runtime
-```
-
-`linker.ld`
-
-负责定义：
-
-```text
-FreeRTOS固件链接地址
-代码段
-数据段
-BSS
-Stack
-Heap
-```
-
-`gic.c`
-
-负责 RK3588 GICv3 中断控制，包括 Distributor、Redistributor 和 CPU Interface。
-
-`timer.c`
-
-使用 ARM Generic Timer 为 FreeRTOS Scheduler 提供系统 Tick。
-
-`uart.c`
-
-提供 FreeRTOS 独立运行阶段的调试输出。
-
-`FreeRTOSConfig.h`
-
-负责调度器、任务优先级、Tick、内存以及 Hook 等 FreeRTOS 参数配置。
-
----
-
-# 八、FreeRTOS 任务设计
-
-FreeRTOS 后续主要承担实时任务，例如：
-
-```text
-Sensor Task
-    ↓
-AHT10
-    ↓
-温湿度采集
-    ↓
-Shared Memory
-```
-
-以及：
-
-```text
-Linux Command
-      ↓
-Shared Memory / RPMsg
-      ↓
-FreeRTOS Control Task
-      ↓
-Fan / GPIO / PWM
-```
-
-第一版计划包含：
-
-```text
-sensor_task
-control_task
-communication_task
-```
-
-传感器数据可采用：
-
-```text
-100 ms
-```
-
-周期采集。
-
-但是控制命令处理不能简单放在同一个 100 ms 轮询周期中。
-
-项目的两个指标需要分开设计：
-
-```text
-传感器采样周期
-
-100 ms
-```
-
-和：
-
-```text
-Linux → FreeRTOS
-控制命令响应时间
-
-≤ 20 ms
-```
-
-因此控制命令需要独立处理，通过更高频检查、通知机制或独立实时任务避免最坏情况下等待完整的 100 ms 采样周期。
-
----
-
-# 九、Linux / FreeRTOS 通信
-
-第一阶段通信优先使用：
-
-```text
-Shared Memory
-```
-
-先完成最小可用的双向通信链路。
-
-后续逐步升级：
-
-```text
-Shared Memory
-      +
-Mailbox
-      +
-RPMsg
-```
+工业控制设备通常同时面对两类任务。
 
-最终形成完整 IPC。
+一类任务关注功能丰富和系统可维护性，例如人机界面、以太网通信、数据库存储、历史记录和远程升级。这些工作适合由 Linux 承担，可以利用现有驱动、网络协议栈和应用生态。
 
-通信方向包括：
+另一类任务关注周期稳定、处理路径明确和故障响应，例如电流采样、电机控制、位置反馈及保护处理。这些任务需要尽可能减少与复杂应用之间的调度耦合。
 
-```text
-FreeRTOS
-   ↓
-Temperature
-Humidity
-Fan Status
-   ↓
-Linux
-```
-
-以及：
-
-```text
-Linux
-   ↓
-Control Command
-   ↓
-FreeRTOS
-   ↓
-Fan / GPIO / PWM
-```
-
-共享内存两侧需要使用统一的数据结构，并保证：
-
-```text
-数据类型一致
-结构体大小一致
-内存对齐一致
-字节序一致
-Cache一致性
-Memory Barrier正确
-```
-
-项目规划先使用共享内存验证数据链路，再逐步加入 Mailbox 与 RPMsg 通知机制。
-
----
-
-# 十、业务功能
-
-完成底层 AMP、FreeRTOS BSP 和 IPC 后，再接入实际业务。
-
-第一版业务：
-
-```text
-AHT10
- │
- ▼
-FreeRTOS Sensor Task
- │
- ├── Temperature
- └── Humidity
- │
- ▼
-Shared Memory / RPMsg
- │
- ▼
-Linux
- │
- └── 数据显示
-```
-
-反向控制：
-
-```text
-User
-
-fan high
-   │
-   ▼
-Linux Command Parser
-   │
-   ▼
-Shared Memory / RPMsg
-   │
-   ▼
-FreeRTOS Control Task
-   │
-   ▼
-Fan
-```
-
-Linux 负责：
-
-```text
-数据显示
-用户交互
-网络通信
-日志存储
-命令下发
-```
-
-FreeRTOS 负责：
-
-```text
-实时采集
-实时控制
-IRQ处理
-低延迟命令执行
-```
-
----
-
-# 十一、项目目录
-
-当前工程目录：
-
-```text
-RK3588_AMP_Controller/
-│
-├── board/
-│   ├── dts/
-│   └── uboot/
-│
-├── common/
-│   ├── amp_shared.h
-│   └── amp_protocol.h
-│
-├── linux/
-│   ├── main.cpp
-│   ├── shared_memory.cpp
-│   └── command.cpp
-│
-├── rtos/
-│   ├── startup.S
-│   ├── linker.ld
-│   ├── FreeRTOSConfig.h
-│   ├── main.c
-│   ├── uart.c
-│   ├── uart.h
-│   ├── gic.c
-│   ├── gic.h
-│   ├── timer.c
-│   ├── timer.h
-│   ├── shared_memory.c
-│   ├── shared_memory.h
-│   ├── sensor_task.c
-│   ├── sensor_task.h
-│   ├── control_task.c
-│   └── control_task.h
-│
-├── scripts/
-│   ├── build_linux.sh
-│   ├── build_rtos.sh
-│   └── deploy.sh
-│
-├── tests/
-│   ├── latency_test.cpp
-│   └── shared_memory_test.cpp
-│
-├── third_party/
-│   └── FreeRTOS-Kernel/
-│
-├── Makefile
-└── README.md
-```
-
----
-
-# 十二、当前开发环境
-
-开发板：
-
-```text
-ATK-DLRK3588B
-```
-
-SoC：
-
-```text
-Rockchip RK3588
-```
-
-CPU：
-
-```text
-4 × Cortex-A55
-4 × Cortex-A76
-8 Core ARM64
-```
-
-当前 Linux：
-
-```text
-Debian Linux
-```
-
-SDK：
-
-```text
-~/rk3588_linux_sdk
-```
-
-项目：
-
-```text
-~/rk3588_projects/RK3588_AMP_Controller
-```
-
-FreeRTOS：
-
-```text
-~/rk3588_projects/RK3588_AMP_Controller/
-third_party/FreeRTOS-Kernel
-```
-
-本项目与：
-
-```text
-RK3588_AI_Vision
-```
-
-为两个独立项目，代码和配置不混用。
-
----
-
-# 十三、当前项目状态
-
-目前开发板仍运行普通 Linux SMP。
-
-```text
-cat /sys/devices/system/cpu/online
-
-0-7
-```
-
-说明 RK3588 当前 8 个 CPU 核心仍全部由 Linux 管理。
-
-当前状态：
-
-```text
-Linux     ：8 Core
-FreeRTOS  ：0 Core
-```
-
-目标状态：
-
-```text
-Linux     ：7 Core
-FreeRTOS  ：1 Core
-```
-
-因此当前项目还不能描述为已经完成 Linux + FreeRTOS AMP 双系统。
-
-已经确认的基础条件包括：
-
-```text
-RK3588 AMP Framework      已存在
-AMP Device Tree           已存在
-PSCI v1.1                 已确认
-SMC Calling Convention    已确认
-GICv3                     已确认
-ARM64 FreeRTOS Port       已确认
-cpu_l3 / MPIDR 0x300      已确认
-FreeRTOS候选内存          已确认
-UART5资源                 已确认
-```
-
-尚未完成：
-
-```text
-cpu_l3正式隔离
-FreeRTOS目标核实际启动
-FreeRTOS Scheduler运行
-FreeRTOS Tick运行
-共享内存双向通信
-Mailbox通信
-RPMsg通信
-AHT10实际采集
-风扇实际控制
-≤20 ms延迟验证
-30 min稳定性验证
-```
-
----
-
-# 十四、开发计划
-
-整个项目严格按照以下原则推进：
-
-> **先证明 Cortex-A55 能独立执行代码，再运行 FreeRTOS，最后实现通信和实际业务。**
-
-不在 AMP Boot 尚未验证的情况下直接调试 FreeRTOS Scheduler，也不在 FreeRTOS 尚未稳定运行的情况下提前加入复杂通信和业务。
-
-| 阶段                    | 先检查／修改哪些文件                                                                                | 达到什么目标                                         | 设计原因                                |
-| --------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------- |
-| 1. 确认实际启动配置           | SDK 的 `BoardConfig*.mk`、实际板级 DTS、U-Boot `.config`                                         | 找准正在使用的设备树、AMP 配置与镜像加载方式                       | 避免修改了示例配置，但实际开发板根本没有使用              |
-| 2. 隔离资源               | 实际板级 DTS，项目 `board/dts/` 保存对应修改                                                           | 从 Linux 移除 `cpu_l3`，确认并保留 RTOS 内存              | 防止两个系统同时使用同一 CPU 或物理内存              |
-| 3. 打包裸机镜像             | 新增 `board/uboot/amp.its`，调整 `Makefile`；按照实际 SDK 配置启用 U-Boot AMP                           | 将现有 `amp_bootstrap.bin` 打包为 `amp.img`，明确实际加载路径 | 建立 U-Boot → AMP → PSCI → A55 的完整启动链 |
-| 4. 验证目标核启动            | 检查 `startup.S`、`linker.ld`、`rtos/main.c`，必要时修改                                            | 在目标核正确读回 Magic、EL、MPIDR 和 Stage，同时 Linux 正常运行  | 先排除镜像、地址、CPU 和启动链问题                 |
-| 5. 完成 FreeRTOS BSP    | 修改 `startup.S`、`FreeRTOSConfig.h`、`main.c`、`Makefile`；实现 UART、GIC、Timer                   | 两个简单任务能够稳定切换，Delay 与 Tick 正常                   | 先验证 RTOS 调度器可靠性，再接入业务               |
-| 6. 实现共享内存双向通信         | `common/amp_shared.h`、`amp_protocol.h`、Linux / RTOS 两侧 `shared_memory.*`、`linux/main.cpp` | Linux 发命令，RTOS 执行并回复，并建立明确的 Cache 与同步规则        | 使用最小协议首先验证 Linux ↔ RTOS 双向数据链路      |
-| 7. 加入 Mailbox / RPMsg | 板级 DTS、RTOS 通信模块、Linux 接口                                                                 | 完成通知机制和 RPMsg 双向验证                             | 在共享内存已经稳定的基础上逐层增加 IPC 复杂度           |
-| 8. 接入实际业务             | `sensor_task.c`、`control_task.c`、Linux `command.cpp`，补充对应外设驱动                             | 完成 AHT10 采集、风扇控制以及 Linux 数据显示                  | 此时 Boot、Scheduler 与 IPC 已经稳定        |
-| 9. 验收记录               | `tests/`、`docs/`                                                                          | 测量命令响应 ≤20 ms，并连续运行至少 30 min                   | 使用实际实验结果证明实时性和稳定性                   |
-
----
-
-# 十五、当前执行阶段
-
-当前优先推进：
-
-```text
-Task 1
-
-确认实际启动配置
-```
-
-现阶段：
-
-```text
-暂不修改 AMP 核心代码
-```
-
-首先需要确认三个关键信息：
-
-```text
-1. 实际 RK_KERNEL_DTS
-
-2. U-Boot AMP Configuration
-
-3. amp.img 实际加载路径
-```
-
-需要重点检查：
-
-```text
-RK3588 Linux SDK
-
-BoardConfig*.mk
-
-U-Boot .config
-
-实际 Board DTS
-
-AMP DTS
-
-启动脚本 / FIT Image配置
-```
-
-原因是 Rockchip SDK 中通常存在多个开发板配置、设备树以及 AMP 示例。
-
-只有确定开发板真正使用：
-
-```text
-哪个 BoardConfig
-
-哪个 DTS
-
-哪个 U-Boot配置
-
-哪个 AMP Image
-```
-
-之后，才能准确修改目标文件。
-
-当前已有裸机代码：
-
-```text
-amp_bootstrap.bin
-```
-
-继续保留，作为第一轮上板测试程序。
-
-第一阶段的目标不是运行 FreeRTOS，而是证明：
+本项目通过 CPU 分核，让两类工作分别运行在 Linux 和 FreeRTOS 中。Linux 向实时系统提交控制目标和参数，FreeRTOS 根据自身周期执行控制，并将运行结果和故障状态反馈给 Linux。
 
-```text
-Linux正常运行
+这种分工可以减少 Linux 任务调度对控制任务的直接影响，但不意味着两端完全互不干扰。它们仍共享部分片上互连、内存系统和硬件资源，因此实时性需要在实际系统负载下测量，不能仅凭独占核心就认定已经满足硬实时要求。
 
-+
+## 系统如何运行
 
-cpu_l3独立启动
+RK3588 包含四个 Cortex-A55 核和四个 Cortex-A76 核。本项目划分其中一个 Cortex-A55 核运行 FreeRTOS，其余七个核心继续运行 Linux SMP 系统。
 
-+
+U-Boot 通过 FIT 镜像加载 FreeRTOS 固件，并启动分配给 RTOS 的核心。工程中的启动汇编和异常向量负责建立运行环境，FreeRTOS 移植层负责任务上下文切换、系统定时器和中断处理。
 
-cpu_l3能够执行自己的AArch64代码
-```
+Linux 设备树移除对应 CPU 节点，并预留一块 16 MiB 的 RTOS 内存区域，避免 Linux 将其作为普通内存使用。对于需要由 FreeRTOS 控制的外设，Linux 通过资源交接驱动准备引脚复用、时钟和复位，再发布交接记录，供 RTOS 核对后访问。
 
-验证信息包括：
+当前采用的是 AMP 分核运行与资源划分方案。工程尚未建立基于虚拟机监控器或 TrustZone 的完整强制隔离机制，不能将其描述为已经完成硬件安全隔离的虚拟化平台。
 
 ```text
-Magic
-EL
-MPIDR
-Stage
+                         RK3588
+┌───────────────────────────────────────────────────┐
+│                                                   │
+│  Linux：其余七核             FreeRTOS：独立 A55 核 │
+│  ┌────────────────────┐     ┌──────────────────┐  │
+│  │ HMI / 网络服务     │     │ IPC / 控制任务   │  │
+│  │ SQLite / 运行记录  │◄───►│ 健康监测         │  │
+│  │ 发布包 / A/B 升级  │ IPC │ CAN1 / UART3     │  │
+│  └────────────────────┘     └──────────────────┘  │
+│                                    │              │
+└────────────────────────────────────┼──────────────┘
+                                     │
+                          后续扩展：采样、PWM、编码器
+                                     │
+                              三相功率级与电机
 ```
-
-理想验证结果：
 
-```text
-Linux
-正常启动
-
-cpu_l3
-独立执行代码
+## Linux 与 FreeRTOS 如何通信
 
-MPIDR
-0x300
-
-EL
-符合预期
-
-Memory
-无冲突
-```
+两端通过共享内存交换命令和状态。协议包含会话标识、序列号及 CRC 校验，用于区分通信会话、匹配请求响应以及检查数据完整性。
 
-完成这一阶段以后，再开始 FreeRTOS Scheduler 移植。
+Linux 应用提交命令后，RTOS 的 IPC 处理逻辑进行参数检查，再将需要执行的操作交给对应任务。任务通过队列接收请求，完成操作后提交结果，由 IPC 返回 Linux。
 
----
+目前，LED 控制已经形成一条完整链路：Linux 下发命令，FreeRTOS 控制 GPIO，再回传执行结果。总线任务沿用同样的组织方式，将通信协议处理与外设操作分开。
 
-# 十六、测试与验收
+重复请求识别和结果缓存用于避免同一个请求被重复执行。但“命令已接收”与“设备已经完成动作”仍是不同概念。后续电机协议会进一步区分目标提交、运行状态和实际反馈，避免把通信成功等同于物理动作完成。
 
-## 1. AMP Boot
+## 当前已经完成的功能
 
-验证：
+当前工程已经验证 Linux 与 FreeRTOS 能够在开发板上协同运行。RTOS 具有独立的任务调度和中断处理环境，Linux 可以通过共享内存查询状态并下发控制命令。
 
-```text
-Linux正常启动
-FreeRTOS目标CPU正常启动
-目标CPU MPIDR正确
-Linux不再调度cpu_l3
-```
+Linux 侧提供 HMI、运行状态查询和 SQLite 历史记录基础。FreeRTOS 侧具有 IPC、控制、总线和健康监测任务，能够展示任务协同及运行状态。
 
-## 2. FreeRTOS Scheduler
+外设方面，项目已经完成 CAN1 和 UART3 的资源交接。Linux 侧驱动负责准备引脚、时钟及复位，并对发布给 RTOS 的波特率时钟进行独占保护。FreeRTOS 在确认交接有效后，才允许访问相应外设。
 
-验证：
+UART3 已通过硬件内部回环测试。Modbus RTU 已实现 03 读保持寄存器、06 写单寄存器、CRC16 校验、帧间静默、响应超时及有界读请求重试，并通过模拟从站读写和板端无从站超时测试。
 
-```text
-Task A
-Task B
-```
+CAN1 已实现经典 CAN 标准数据帧接口、中断接收队列、状态查询及显式恢复接口，发送完成中断已经上机验证。内部回环接收尚未通过，真实外部收发和 Bus-off 恢复仍需继续排查与联调。当前不能将其描述为完整 CAN 通信验收通过，也不支持宣称已经实现两路 CAN FD。
 
-可以正常进行：
+| 功能 | 当前验证状态 |
+|---|---|
+| Linux + FreeRTOS 分核启动 | 已上机验证 |
+| 共享内存 IPC 与 LED 控制 | 已跑通 |
+| HMI、健康监测与历史记录 | 已完成基础功能 |
+| CAN1 / UART3 资源交接 | 已上机验证 |
+| UART3 硬件内部回环 | 已通过 |
+| 模拟 Modbus 读写 | 已通过 |
+| Modbus 无从站超时返回 | 已通过 |
+| CAN 发送完成中断 | 已通过 |
+| CAN 接收与外部总线通信 | 待排查、待验收 |
+| 真实 Modbus 从站通信 | 待外部设备验收 |
+| 电机 FOC 与伺服闭环 | 待开发 |
 
-```text
-Create
-Switch
-Delay
-Wakeup
-```
+## 系统如何升级和确认健康
 
-## 3. Timer
+项目采用覆盖 Linux 启动镜像、rootfs 和 RTOS 固件的配套发布方式。发布工具生成签名升级包，开发板使用包外可信公钥验签，再进行镜像检查和非活动槽写入。
 
-验证：
+写入完成后，系统读回目标分区，核对数据一致性，再更新 A/B 启动元数据。U-Boot 根据元数据选择启动槽，并管理试启动次数。
 
-```text
-FreeRTOS Tick稳定
-vTaskDelay正常
-系统运行时间正常
-```
+试启动期间，看门狗与 Linux 健康服务协同工作。健康服务检查 RTOS 控制状态及相关应用服务，条件满足后确认新槽。工程已经完成 A/B 双向升级、看门狗接管及启动健康确认验证。
 
-## 4. IPC
+回退机制的代码与基础流程已经建立，但完整故障验收仍需要覆盖启动失败、服务异常、升级中断和元数据异常等场景。项目不将现有验证结果扩大为“任意断电均不变砖”或“回滚成功率百分之百”。
 
-验证：
+后续接入真实电机时，升级流程还需要增加电机安全状态检查：升级前停止运动并撤销驱动使能，重启或回退后默认保持禁止输出，不自动恢复之前的运行命令。
 
-```text
-Linux → FreeRTOS
+## 接下来为什么加入电机控制
 
-FreeRTOS → Linux
-```
+现阶段的 LED 和总线示例主要用于验证系统基础能力。加入电机控制后，项目将形成更加完整的业务闭环：Linux 设置运动目标，FreeRTOS 周期执行控制，设备产生反馈，故障保护改变运行状态，Linux 展示并记录整个过程。
 
-双向数据：
+新的目标是让独立 A55 核直接执行电机控制算法，而不是仅通过 CAN 向现成驱动器发送目标转速。
 
-```text
-无明显丢失
-无数据错乱
-无重复处理
-无死锁
-```
+在最终方案中，外部三相逆变功率级负责驱动电机，电流采样器和编码器提供反馈。Clarke、Park、逆 Park、SVPWM、电流 PI、速度环、位置环及运动规划都计划在 FreeRTOS 中执行。
 
-## 5. 实时性能
+这条路线比增加一个普通应用任务更复杂。除了算法正确性，还必须解决同步采样、PWM 更新、编码器延迟、计算执行时间及硬件故障关断问题。
 
-重点测试：
+## 电机控制将怎样实现
 
-```text
-Linux发送命令
-        ↓
-FreeRTOS收到命令
-        ↓
-执行控制
-```
+开发首先从算法和模拟模型开始。坐标变换、PI 控制、积分抗饱和及 SVPWM 占空比计算会独立于具体硬件组织，使用主机测试检查数值边界，再通过模拟反馈验证状态机和控制流程。
 
-目标：
+硬件接口验证与算法开发并行进行。需要先确认 RK3588 片内 PWM 是否满足三相同步及周期边界更新要求，确认采样设备如何与 PWM 同步，以及板卡是否引出了所需引脚。存在 PWM 和 ADC 外设，并不等于已经具备完整电机控制时序能力。
 
-```text
-Response Latency ≤ 20 ms
-```
+如果片内外设不能满足要求，可以使用外部同步采样器或时序电路补足接口能力。此时 A55 仍承担全部控制算法，外部器件只负责采样、同步和输出时序，不由另一颗 MCU 代算 FOC。
 
-这里的：
+真实闭环按照电流环、速度环、位置环的顺序建立。电流环稳定后，再增加速度调节和位置控制，最后加入梯形或 S 曲线运动规划。首版采用编码器反馈的有传感器控制，无传感器观测器作为后续扩展。
 
 ```text
-100 ms Sensor Sampling
+电流采样 + 编码器角度
+          │
+          ▼
+   Clarke / Park 变换
+          │
+          ▼
+      d/q 轴电流 PI
+          │
+          ▼
+   电压限幅 / 逆 Park
+          │
+          ▼
+         SVPWM
+          │
+          ▼
+     同步更新三相输出
+          │
+          ▼
+      功率级与电机
 ```
-
-和：
 
-```text
-≤ 20 ms Command Response
-```
+位置环和速度环以较低频率运行，为内层控制提供目标。Linux 只提交目标和参数，不参与每个高频控制周期。
 
-属于两个不同实时指标，必须采用不同任务或通知机制设计。
+## 实时性需要怎样验证
 
-## 6. 稳定性
+当前 FreeRTOS 系统 Tick 为 100 Hz，不能直接用现有任务延时机制驱动高频电流环。FOC 控制流程需要由与 PWM 同步的硬件事件或采样完成事件触发。
 
-第一阶段：
+控制计算放在 ISR 中，还是通过通知唤醒高优先级任务，需要根据中断延迟、上下文开销和可维护性进行选择，并通过测量确定。
 
-```text
-连续运行 ≥ 30 min
-```
+工程还需要明确浮点或定点计算路线。当前构建使用通用寄存器限制，现有移植层虽然包含浮点上下文保存机制，但仍需验证浮点访问权限、任务切换、ISR 使用策略、栈占用和执行时间。
 
-后续继续进行：
+实时性验收不仅关注平均算法耗时，还要记录控制周期、最坏执行时间、采样到输出的总延迟、抖动及超期次数。测试需要同时施加 Linux 网络、存储和显示负载，观察共享资源争用是否影响控制链路。
 
-```text
-1 h
-8 h
-24 h
-```
+在这些测试完成之前，项目不预先承诺电流环频率、定位精度或动态响应指标。
 
-长时间稳定性测试。
+## 故障保护如何设计
 
-验收阶段需要同时观察 FreeRTOS 任务、Linux 应用以及 IPC 是否稳定，并记录通信延迟、数据完整性和异常状态。项目原始任务要求中也明确提出控制响应延迟目标为 `≤20 ms`，并至少进行 `30 min` 连续运行测试。
+真实电机控制中的故障保护不能只依靠一个软件任务。
 
----
+功率级应具有独立的过流关断、死区和紧急停机条件。快速故障可以直接撤销功率输出，软件负责进一步识别故障、锁存状态、通知 Linux 并管理复位过程。
 
-# 十七、关键技术点
+FreeRTOS 将处理过流、过温、欠压、堵转、编码器异常、反馈过期、控制周期超期和通信失联等情况。故障发生后，系统进入明确的保护状态；故障条件解除并完成显式复位后，也不会自动恢复运行。
 
-本项目涉及的主要嵌入式技术包括：
+没有真实功率级时，可以通过模拟电机和故障注入测试上述逻辑。模拟模式必须在界面与日志中明确标识，其结果不能替代真实保护关断时间和实际电机运行测试。
 
-```text
-RK3588
-ARMv8-A / AArch64
-Cortex-A55
-Cortex-A76
-
-AMP
-Linux SMP
-FreeRTOS
-
-U-Boot
-FIT Image
-PSCI
-SMC
-Trusted Firmware / BL31
-
-Device Tree
-CPU Topology
-reserved-memory
-
-GICv3
-ICC_*_EL1
-
-ARM Generic Timer
-
-EL1
-VBAR_EL1
-SPSR_EL1
-ELR_EL1
-
-MMU / Cache
-Memory Barrier
-
-Shared Memory
-Mailbox
-RPMsg
-
-UART
-I2C
-GPIO
-PWM
-
-Linux / FreeRTOS IPC
-```
+## 从单轴扩展到多轴
 
----
-
-# 十八、项目最终成果
-
-项目完成后预计形成：
-
-* RK3588 Debian Linux + FreeRTOS AMP 双系统运行环境。
-* Linux SMP + FreeRTOS 单核异构 CPU 架构。
-* Cortex-A55 CPU 独立启动机制。
-* FreeRTOS ARM64 BSP。
-* GICv3 中断系统。
-* ARM Generic Timer FreeRTOS Tick。
-* UART 调试模块。
-* CPU / Memory / Peripheral 资源隔离方案。
-* Rockchip AMP FIT Image。
-* Linux / FreeRTOS Shared Memory IPC。
-* Mailbox / RPMsg 双向通信。
-* AHT10 温湿度实时采集。
-* FreeRTOS 实时控制任务。
-* Linux 数据显示与控制命令接口。
-* IPC 延迟测试。
-* 长时间稳定性测试。
-* RK3588 AMP 系统启动、调试及异常排查文档。
-
-最终形成完整的数据闭环：
+项目先完成一个本地电机轴，再通过 CAN 连接其他驱动节点，探索分布式多轴协调。
 
-```text
-            Linux
-              │
-        Control Command
-              │
-              ▼
-      Shared Memory / RPMsg
-              │
-              ▼
-          FreeRTOS
-              │
-       Real-Time Control
-              │
-              ▼
-        Sensor / Fan
-              │
-        Sensor Status
-              │
-              ▼
-      Shared Memory / RPMsg
-              │
-              ▼
-            Linux
-              │
-      Display / Network
-```
+后续工作包括节点管理、目标缓冲、同步命令、时间信息传递、失联处理及电子齿轮接口。多轴验收需要区分命令到达一致性、节点时钟偏差和实际运动误差，不能仅凭多个节点在同一任务周期执行命令，就认定已经完成精确同步。
 
----
+当前“多轴”属于后续扩展方向，尚未形成已验证的多轴伺服系统。
 
-# 十九、项目定位
+## 工程中的主要模块
 
-本项目重点不是简单地在 RK3588 上移植一个 FreeRTOS Demo，而是围绕：
+| 路径 | 主要用途 |
+|---|---|
+| `board/rk3588/startup.S` | RTOS 启动与运行环境建立 |
+| `board/rk3588/vector.S` | 异常及中断入口 |
+| `rtos/main.c` | RTOS 初始化与任务创建 |
+| `rtos/shared_memory.c` | RTOS 侧 IPC 请求与响应处理 |
+| `rtos/control_task.c` | 当前 LED 控制任务 |
+| `rtos/bus_task.c` | CAN、UART 与 Modbus 操作调度 |
+| `rtos/drivers/` | 外设驱动、中断分派及资源交接 |
+| `rtos/protocol/` | Modbus 编解码、主站与模拟从站 |
+| `common/amp_message.*` | 公共消息格式与编解码 |
+| `common/amp_transport.*` | 公共共享内存传输机制 |
+| `linux/amp_ipc.*` | Linux IPC 客户端接口 |
+| `linux/amp_busctl.c` | 总线诊断命令行工具 |
+| `linux/amp_hmi.py` | HMI 与历史记录服务 |
+| `tools/ota_release.py` | 发布包签名与验收 |
+| `tools/amp_ab_update.py` | A/B 更新工具 |
+| `tests/` | 主机侧功能与异常路径测试 |
 
-```text
-Multi-Core SoC
-        +
-Linux / RTOS
-        +
-CPU Isolation
-        +
-Memory Isolation
-        +
-Real-Time Scheduling
-        +
-Inter-Core Communication
-```
+Linux Kernel 和 U-Boot 的配套改动位于独立 SDK 仓库中，包括设备树、外设资源交接驱动、启动槽路由和看门狗适配。本仓库不能单独代表完整可部署系统，发布时需要记录并匹配各仓库版本。
 
-建立一个完整的异构多核控制系统。
+## 开发路线
 
-项目可以进一步扩展到：
+项目接下来按照以下顺序推进：
 
-* 车载域控制器。
-* 工业实时控制器。
-* 机器人控制器。
-* 无人设备控制平台。
-* 智能终端。
-* 边缘控制设备。
+1. 建立电机状态机、参数模型和统一硬件接口。
+2. 完成 FOC 基础算法、控制器及模拟电机测试。
+3. 验证浮点或定点运行环境，以及专用控制事件。
+4. 核实 PWM、同步采样、编码器和硬件保护条件。
+5. 在低压、限流条件下建立有传感器电流闭环。
+6. 增加速度环、位置环及运动规划。
+7. 扩展 IPC、HMI、运行记录和安全升级流程。
+8. 完成负载、故障与持续运行验收，再开展无传感器和多轴扩展。
 
-其核心架构与“通用 Linux 系统负责复杂业务，实时系统负责确定性控制”的域控制器设计思路一致。原始方案同样将 Linux/Android 一侧定位为交互、显示、网络等复杂业务，将实时系统定位为控制、采集和总线业务，并通过共享内存/RPMsg进行系统间通信。
+本项目当前的成果是可运行的 AMP 控制与升级原型。后续目标是构建由 A55 直接执行控制算法的单轴伺服平台，但不将尚未开发或尚未测试的功能描述为已完成成果，也不将原型验证等同于量产、EMC 或功能安全认证。
