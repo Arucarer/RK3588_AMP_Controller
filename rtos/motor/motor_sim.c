@@ -77,3 +77,11 @@ int amp_motor_sim_feedback(const AmpMotorSim *s, AmpMotorFeedback *f)
     *f = s->feedback;
     return 0;
 }
+
+int amp_motor_sim_invalidate(AmpMotorSim *s)
+{
+    if (!s) return -1;
+    s->feedback.valid = 0;
+    s->feedback.age_ms = UINT32_MAX;
+    return 0;
+}

@@ -59,3 +59,32 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 
 本阶段仍未改动现有 Makefile、main、IPC 或板端固件；主机验证不代表实时任务
 已在开发板运行。下一阶段再添加默认仅SIM运行的独立任务和队列。
+
+## 第三版：独立 MotorSIM 任务与队列接口
+
+`motor_task.h/.c` 创建一个10ms周期、优先级2、栈深1024个元素的SIM任务。
+当前适配100Hz Tick，按实际经过的Tick推进；迟到时重置下次唤醒时间，不连续
+补算控制步。超过100ms的间隔触发已使能控制器的时序故障，并使反馈无效，
+不把软件需求归零当作转子已停止的证据。过期后排队的心跳不能覆盖已有超时。
+
+三个深度1队列分别承担命令、回复和最新快照。只有任务拥有控制器和模拟设备。
+单个客户端submit/receive，每次只能有一个在途请求；取回回复前持续返回忙。
+快照通过overwrite/peek发布，查询不消耗快照。回复保留session和sequence，
+但尚未实现IPC会话授权、去重或在线配置。command回复只表示接受结果。
+
+所有快照simulation固定为1，初始状态为DISABLED。无自动使能、无自动心跳、
+无真实硬件后端。故障注入仅操作内存中的模拟模型。低频SIM任务不是FOC任务。
+下一阶段需要增加IPC入口、main初始化、构建源列表及健康监测，再考虑板端部署。
+当前只提供任务实现，不在现有启动路径创建它，已有调度与命令保持不变。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+    -Itests/support/motor_rtos tests/motor_task_test.c \
+    rtos/motor/motor_task.c rtos/motor/motor_control.c rtos/motor/motor_sim.c \
+    -o /tmp/amp_motor_task_test
+/tmp/amp_motor_task_test
+```
+
+该测试使用确定性FreeRTOS API替身运行实际任务循环，验证队列、失败清理、
+命令回复、快照、租约、调度超期、Tick回绕及注入；不验证真实FreeRTOS调度、
+抢占、堆/栈余量或板端10ms周期。替身头文件只用于主机测试，禁止用于固件。

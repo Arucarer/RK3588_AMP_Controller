@@ -35,5 +35,7 @@ int amp_motor_sim_inject(AmpMotorSim *sim, uint32_t load_permille,
 int amp_motor_sim_step(AmpMotorSim *sim, uint32_t dt_ms,
                        int32_t demand_rpm, int enabled);
 int amp_motor_sim_feedback(const AmpMotorSim *sim, AmpMotorFeedback *feedback);
+/* A scheduling gap is not a fresh measurement or evidence of physical stop. */
+int amp_motor_sim_invalidate(AmpMotorSim *sim);
 
 #endif
