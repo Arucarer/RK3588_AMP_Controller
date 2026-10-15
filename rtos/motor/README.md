@@ -30,5 +30,32 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 ```
 
 阅读顺序：motor_control.h（状态/接口）→ motor_control.c（转换/保护/斜坡）→
-tests/motor_control_test.c（行为与边界）。后续新增模拟设备，再接 RTOS 队列，
-最后扩展 IPC；每一阶段单独验证与提交。
+tests/motor_control_test.c（行为与边界）。模拟设备见下文；后续接 RTOS 队列，
+再扩展 IPC，每一阶段单独验证与提交。
+
+## 第二版：SIM 行为模型
+
+`motor_sim.h/.c` 提供确定性的整数模型：转速一阶响应、负载降速和电流增加、
+电流相关升温、撤销使能后的滑行及冷却。它不包含电阻、电感、磁链、三相电流
+或转子动力学，不能用于 FOC 数值验证、控制器整定或真实电机性能预测。
+输入必须来自已校验的目标；无硬件模式、无真实功率输出。
+
+注入支持堵转、反馈丢失和合成过温反馈。堵转时本模型把速度强制为零并提高
+电流，联合测试通过现有过流保护停机；这不是已经实现独立的堵转识别算法。
+反馈丢失时保持最后发布的数值并累加 age_ms，内部模型仍继续运行；恢复时发布
+最新反馈并清零年龄。年龄饱和到 UINT32_MAX，不会回绕。过温注入改变传感器
+反馈，不修改内部热状态；清除后由正常反馈决定能否显式复位。
+
+联合调用顺序：读取快照 → 状态机 step → 将需求和使能状态交给模拟设备 step。
+故障会撤销下一步模拟设备使能，但真实硬件仍需独立的禁用与故障关断接口。
+启动参数和模型响应常数均为测试示例，不是已选电机参数。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+    tests/motor_sim_test.c rtos/motor/motor_sim.c rtos/motor/motor_control.c \
+    -o /tmp/amp_motor_sim_test
+/tmp/amp_motor_sim_test
+```
+
+本阶段仍未改动现有 Makefile、main、IPC 或板端固件；主机验证不代表实时任务
+已在开发板运行。下一阶段再添加默认仅SIM运行的独立任务和队列。
