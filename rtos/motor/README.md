@@ -144,3 +144,15 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 
 桥接测试使用任务队列替身，不等于共享内存物理链路已上机。Linux命令行工具、
 板端回归及业务闭环验收仍未完成，本阶段不部署固件。
+
+## 第六版：Linux MotorSIM命令行
+
+新增linux/amp_motorctl.c和tools/build_motorctl.sh。run命令完成启停及周期心跳，
+独立命令支持状态、目标、故障注入和复位。令牌文件跨短IPC会话保持控制权，
+每次交易结束关闭IPC连接，避免运行期间长期占用全局IPC锁。
+仅重试获取忙锁，不自动重放结果未知的命令；异常后尽力禁用，不能证明物理停机。
+详细用法和限制见linux/scripts/motorctl-usage.md。
+
+主机集成测试：`python3 tests/motor_cli_test.py`。11项用例及带地址/未定义行为
+检查的模拟运行通过；ARM64静态编译通过。测试中的时钟、IPC设备和任务队列为
+替身，尚未进行板端RTOS调度、IPC争用、看门狗与HMI并发验收。不刷写开发板。
