@@ -156,3 +156,13 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 主机集成测试：`python3 tests/motor_cli_test.py`。11项用例及带地址/未定义行为
 检查的模拟运行通过；ARM64静态编译通过。测试中的时钟、IPC设备和任务队列为
 替身，尚未进行板端RTOS调度、IPC争用、看门狗与HMI并发验收。不刷写开发板。
+
+## 第七版：离线交付准备，板端验收延期
+
+tools/prepare_motor_sim.py从当前工作区复制构建快照，在临时目录中编译RTOS和
+Linux工具，向全新目录输出配套镜像、ELF/MAP、编译日志、源码/产物清单及哈希。
+原有构建产物、Git改动和SDK保持不变。输出不是完整签名OTA，不包含boot/rootfs，
+也不连接开发板。详细步骤见linux/scripts/motor-offline-handoff.md。
+
+当前模拟电机的软件实现和主机检查已完成，板端验收按用户安排延期，未标记通过。
+真实电机FOC、同步PWM/采样、编码器、硬件保护及实时性能仍属于后续开发与验证。
