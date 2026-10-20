@@ -7,6 +7,7 @@
 #include "control_task.h"  /* 引入 LED 控制命令、结果及任务接口 */
 #include "monitor_task.h"  /* 引入任务心跳、故障位及健康快照接口 */
 #include "bus_task.h"      /* 引入总线命令、结果及任务队列接口 */
+#include "motor/motor_task.h"
 
 #define AMP_BOOT_MAGIC 0xA55A55A55AA55AA5ULL /* 启动握手记录的有效标记，数据写好后发布 */
 #define AMP_BOOT_FLAG_ADDR 0x20FE0000ULL /* 启动握手记录的共享内存物理地址 */
@@ -222,6 +223,11 @@ void amp_main(void)
         rtos_stop(4);
 
     if (amp_bus_task_init() != 0)
+        rtos_stop(4);
+
+    /* SIM only, starts DISABLED. No PWM, ADC or physical motor access. */
+    monitor_require_motor();
+    if (amp_motor_task_init() != 0)
         rtos_stop(4);
     /*
      * Stack depth is in StackType_t units:

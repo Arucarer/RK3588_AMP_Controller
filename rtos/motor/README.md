@@ -88,3 +88,29 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 该测试使用确定性FreeRTOS API替身运行实际任务循环，验证队列、失败清理、
 命令回复、快照、租约、调度超期、Tick回绕及注入；不验证真实FreeRTOS调度、
 抢占、堆/栈余量或板端10ms周期。替身头文件只用于主机测试，禁止用于固件。
+
+## 第四版：接入构建、启动与健康监测
+
+现有Makefile现在编译三个motor模块；main在调度器启动前创建MotorSIM，失败
+沿用任务初始化失败路径。启动后模拟任务自动推进，但控制器仍为DISABLED，
+没有自动使能、转动或访问PWM/ADC/CAN/UART。现有LED、总线命令和IPC格式不变。
+电机IPC、Linux命令行及板端部署是后续独立任务；当前没有外部电机控制入口。
+
+monitor_require_motor在创建任务时登记心跳要求。每完成一次模拟周期后上报
+MONITOR_MOTOR；健康ready必须等到它至少完成一次周期。超过1000ms未上报
+（沿用旧监测规则，严格大于）产生MONITOR_FAULT_MOTOR=0x10并锁存。恢复心跳
+只能清除当前故障，不能清除历史故障；现有Linux健康服务会拒绝非零故障。
+
+模拟过流、过温、命令失联等是业务故障，任务仍存活时不会设置任务超时位。
+10ms周期超期计数保留在电机快照中，不等同于已经满足高频实时控制要求。
+MonitorSnapshot仍为32字节，旧健康消息各字段偏移不变；没有新增motor_age字段。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+    -Itests/support/motor_rtos tests/monitor_motor_test.c rtos/monitor_task.c \
+    -o /tmp/amp_monitor_motor_test
+/tmp/amp_monitor_motor_test
+```
+
+以上主机测试及隔离副本完整固件构建通过不代表已上机。板端任务周期、堆/栈
+余量、原业务并发及A/B健康确认仍需配套发布后的验收；本阶段不刷写开发板。

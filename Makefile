@@ -74,6 +74,9 @@ C_SRCS := \
 	rtos/bus_task.c \
 	rtos/protocol/modbus_mock.c \
 	rtos/control_task.c \
+	rtos/motor/motor_control.c \
+	rtos/motor/motor_sim.c \
+	rtos/motor/motor_task.c \
 	$(PORT_DIR)/port.c
 
 ASM_SRCS := \

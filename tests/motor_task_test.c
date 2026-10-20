@@ -6,6 +6,7 @@
 #include "support/motor_rtos/task.h"
 #include "support/motor_rtos/queue.h"
 #include "../rtos/motor/motor_task.h"
+#include "../rtos/monitor_task.h"
 
 struct TestQueue { size_t size; int full; unsigned char bytes[512]; };
 static struct TestQueue *queues[3];
@@ -16,6 +17,13 @@ static TickType_t tick;
 static jmp_buf done;
 static unsigned rounds, stop_after;
 static TickType_t extra_gap;
+static unsigned motor_beats;
+
+void monitor_beat(unsigned int task_id)
+{
+    assert(task_id == MONITOR_MOTOR);
+    ++motor_beats;
+}
 
 QueueHandle_t xQueueCreate(UBaseType_t count, UBaseType_t size)
 {
@@ -159,6 +167,7 @@ int main(void)
     tick = UINT64_MAX;
     run(1);
     assert(amp_motor_task_snapshot(&s) == 1 && s.tick == 0);
+    assert(motor_beats == s.cycles);
     while (allocated) vQueueDelete(queues[0]); /* Process exit: fake worker is stopped. */
     puts("PASS: SIM task initialization/cleanup, queues, replies, snapshots, lease, timing fault, tick wrap");
     return 0;

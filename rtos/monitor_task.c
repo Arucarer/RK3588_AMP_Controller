@@ -4,7 +4,8 @@
 #include "task.h"         /* 引入 FreeRTOS 任务、延时及调度接口 */
 #include "monitor_task.h" /* 引入任务心跳、故障位及健康快照接口 */
 
-static TickType_t last_beat[2]; /* last_beat：IPC 和控制任务最近一次心跳的 Tick 时间 */
+static TickType_t last_beat[3]; /* IPC、LED 控制及 MotorSIM 的心跳 */
+static uint32_t required;      /* 必须已上报心跳的任务位图 */
 static TickType_t last_check;   /* last_check：监控任务最近一次检查的 Tick 时间 */
 static uint32_t seen;           /* seen：已收到心跳的任务位图 */
 static uint32_t checks;         /* checks：健康检查累计次数 */
@@ -37,6 +38,10 @@ static uint32_t get_faults(TickType_t now)
     if ((TickType_t)(now - last_beat[MONITOR_CONTROL]) > timeout)
         faults |= MONITOR_FAULT_CONTROL;
 
+    if ((required & (1U << MONITOR_MOTOR)) &&
+        (TickType_t)(now - last_beat[MONITOR_MOTOR]) > timeout)
+        faults |= MONITOR_FAULT_MOTOR;
+
     if ((TickType_t)(now - last_check) > timeout)
         faults |= MONITOR_FAULT_SELF;
 
@@ -54,7 +59,7 @@ void monitor_beat(unsigned int task_id)
     TickType_t now;
 
     configASSERT(initialized);
-    configASSERT(task_id < 2U);
+    configASSERT(task_id < 3U);
 
     taskENTER_CRITICAL();
 
@@ -78,6 +83,17 @@ void monitor_report_led_fault(void)
     taskEXIT_CRITICAL();
 }
 
+void monitor_require_motor(void)
+{
+    configASSERT(initialized);
+    taskENTER_CRITICAL();
+    if (!(required & (1U << MONITOR_MOTOR))) {
+        last_beat[MONITOR_MOTOR] = xTaskGetTickCount();
+        required |= 1U << MONITOR_MOTOR;
+    }
+    taskEXIT_CRITICAL();
+}
+
 void monitor_snapshot(MonitorSnapshot *snapshot)
 {
     /* 1. 检查输出指针并进入临界区。 */
@@ -96,7 +112,7 @@ void monitor_snapshot(MonitorSnapshot *snapshot)
     faults = get_faults(now);
     latched_faults |= faults;
 
-    snapshot->ready = (seen == 3U && checks != 0);
+    snapshot->ready = ((seen & required) == required && checks != 0);
     snapshot->faults = faults;
     snapshot->latched_faults = latched_faults;
     snapshot->checks = checks;
@@ -160,6 +176,8 @@ int monitor_init(void)
 
     last_beat[0] = now;
     last_beat[1] = now;
+    last_beat[2] = now;
+    required = (1U << MONITOR_IPC) | (1U << MONITOR_CONTROL);
     last_check = now;
     seen = 0;
     checks = 0;

@@ -5,16 +5,18 @@
 
 #define MONITOR_IPC 0U     /* IPC 任务在心跳数组中的索引 */
 #define MONITOR_CONTROL 1U /* 控制任务在心跳数组中的索引 */
+#define MONITOR_MOTOR 2U   /* MotorSIM 任务心跳，不代表真实电机健康 */
 
 /* 故障位，可组合。 */
 #define MONITOR_FAULT_IPC (1U << 0)     /* 故障位 0：IPC 任务心跳超时 */
 #define MONITOR_FAULT_CONTROL (1U << 1) /* 故障位 1：控制任务心跳超时 */
 #define MONITOR_FAULT_SELF (1U << 2)    /* 故障位 2：监控任务自身检查超时 */
 #define MONITOR_FAULT_LED (1U << 3)     /* 故障位 3：LED 驱动异常 */
+#define MONITOR_FAULT_MOTOR (1U << 4)   /* MotorSIM 任务心跳超时 */
 
 /* 在临界区采集的任务健康快照，用于 IPC 状态上报。 */
 typedef struct {
-    uint32_t ready;          /* IPC 和控制任务均上报过心跳且监控已检查时为 1 */
+    uint32_t ready;          /* 所有必需任务均上报过心跳且监控已检查时为 1 */
     uint32_t faults;         /* 当前故障位图，按 MONITOR_FAULT_* 掩码解释 */
     uint32_t latched_faults; /* 启动以来锁存的历史故障位图 */
     uint32_t checks;         /* 监控任务累计完成的健康检查次数 */
@@ -26,6 +28,9 @@ typedef struct {
 
 /* 调度器启动前调用一次。 */
 int monitor_init(void);
+/* Call before scheduler start when MotorSIM is created. Idempotent; legacy
+ * two-task users need not call it. Does not change MonitorSnapshot wire size. */
+void monitor_require_motor(void);
 
 /* 以下接口只在任务上下文使用，不在 ISR 中调用。 */
 void monitor_beat(unsigned int task_id);

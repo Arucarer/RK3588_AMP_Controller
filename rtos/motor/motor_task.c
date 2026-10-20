@@ -3,6 +3,7 @@
 #include "task.h"
 #include "queue.h"
 #include "motor_task.h"
+#include "../monitor_task.h"
 
 #if configTICK_RATE_HZ != 100
 #error Motor_SIM_task_currently_validated_only_with_100_Hz_tick
@@ -101,6 +102,9 @@ static void motor_task(void *argument)
             BaseType_t sent = xQueueOverwrite(snapshots, &snapshot);
             configASSERT(sent == pdTRUE);
         }
+        /* Report completed cycles, not physical motor health. An injected
+         * business fault must not reboot an otherwise healthy RTOS. */
+        monitor_beat(MONITOR_MOTOR);
     }
 }
 
