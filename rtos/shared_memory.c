@@ -4,6 +4,8 @@
 #include "task.h"                    /* 引入 FreeRTOS 任务、延时及调度接口 */
 #include "shared_memory.h"           /* 引入 RTOS 共享内存 IPC 初始化及任务入口 */
 #include "control_task.h"            /* 引入 LED 控制命令、结果及任务接口 */
+#include "motor/motor_ipc.h"
+#include "../common/amp_motor_protocol.h"
 #include "bus_task.h"                /* 引入总线命令、结果及任务队列接口 */
 #include "drivers/amp_bus_handoff.h" /* 引入总线资源交接、MMIO 访问及截止时间接口 */
 #define AMP_OP_BUS_EXEC 0x30U        /* IPC 操作码：向 RTOS 总线任务提交命令 */
@@ -217,6 +219,11 @@ static void handle_request(const AMPMessage *request, AMPMessage *response)
     switch (request->opcode) {
 
         /* ---------- 5.1 CAN / UART / Modbus 总线操作 ---------- */
+
+    case AMP_OP_MOTOR_STATUS:
+    case AMP_OP_MOTOR_EXEC:
+        if (amp_motor_ipc_handle(request, response)) return;
+        break;
 
     case AMP_OP_BUS_EXEC: {
         AmpBusCommand command = {0}; // 初始化总线命令结构体
@@ -577,6 +584,7 @@ void amp_ipc_init(void)
     have_cached_response = 0;
     control_pending = 0;
     bus_pending = 0;
+    amp_motor_ipc_init();
 
     result = amp_transport_init(transport);
     configASSERT(result == AMP_TRANSPORT_OK);
@@ -614,6 +622,18 @@ void amp_ipc_task(void *argument)
          * 控制任务完成后，才产生最终响应。
          * IpcTask 不阻塞等待队列。
          */
+        if (amp_motor_ipc_pending()) {
+            AMPMessage original;
+            if (amp_motor_ipc_collect(&original, &pending_response)) {
+                if (pending_response.status != AMP_RESULT_OK ||
+                    (pending_response.payload_length == AMP_MOTOR_WIRE_STATUS_SIZE &&
+                     amp_motor_wire_get32(pending_response.payload + 16) != 0))
+                    ++rejected_requests;
+                cache_result(&original, &pending_response);
+                response_pending = 1;
+            }
+        }
+
         if (bus_pending) {
             if (collect_bus_result(&pending_response))
                 response_pending = 1;
@@ -642,7 +662,7 @@ void amp_ipc_task(void *argument)
          * 控制命令尚未完成或响应尚未发布时，
          * 不处理下一条请求，也不切换会话。
          */
-        if (!response_pending && !control_pending && !bus_pending) {
+        if (!response_pending && !control_pending && !bus_pending && !amp_motor_ipc_pending()) {
             result = amp_channel_receive(&transport->linux_to_rtos, &request);
 
             if (result == AMP_TRANSPORT_OK) {
@@ -655,7 +675,7 @@ void amp_ipc_task(void *argument)
                      * 普通命令立即产生响应。
                      * LED 命令等待 ControlTask 的执行结果。
                      */
-                    if (!control_pending && !bus_pending)
+                    if (!control_pending && !bus_pending && !amp_motor_ipc_pending())
                         response_pending = 1;
                 } else {
                     ++bad_frames;

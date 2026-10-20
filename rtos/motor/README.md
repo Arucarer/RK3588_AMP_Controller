@@ -114,3 +114,33 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
 
 以上主机测试及隔离副本完整固件构建通过不代表已上机。板端任务周期、堆/栈
 余量、原业务并发及A/B健康确认仍需配套发布后的验收；本阶段不刷写开发板。
+
+## 第五版：电机IPC扩展
+
+新增STATUS=0x40和EXEC=0x41，V1负载定义见common/amp_motor_protocol.h。
+STATUS请求为0字节；EXEC为32字节，响应为64字节。小端逐字段编码，明确SIM=1，
+不复制C结构体。负转速、电流、温度和业务结果使用32位补码编码；Tick为64位。
+外层status表示IPC接受/拒绝，负载result表示电机命令接受结果，均不代表动作完成。
+不改变旧GET_STATUS、LED和BUS的消息布局。
+
+EXEC支持使能、禁用、启动、停止、目标、心跳、复位、SIM故障注入。IpcTask先
+执行原有会话/序号检查和重复请求缓存，再调用桥接；异步任务完成后才缓存回复。
+等待电机结果期间不消费新请求，不切换HELLO会话；重复心跳重放缓存，不延长租约。
+
+控制令牌为独立非零64位值，与每次短连接的IPC session不同。Linux工具后续应
+跨交易保存令牌，每次交易只短暂占用现有IPC锁，不能长期占锁阻塞健康服务。
+令牌是协作式所有权标识，不是身份认证；当前/dev/mem访问权限仍由Linux管理。
+状态查询不占有电机、不续租。其他令牌不能修改运行中/停止中的控制器。新令牌
+可显式使能DISABLED、禁用READY/DISABLED，或在FAULT时请求复位；实际复位仍需
+MotorSIM确认反馈健康且静止。成功禁用/复位释放令牌；失败不转移控制权。
+控制端消失时由已有运行租约超时锁存故障，不自动重启电机。
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+    tests/motor_ipc_test.c rtos/motor/motor_ipc.c common/amp_message.c \
+    -o /tmp/amp_motor_ipc_test
+/tmp/amp_motor_ipc_test
+```
+
+桥接测试使用任务队列替身，不等于共享内存物理链路已上机。Linux命令行工具、
+板端回归及业务闭环验收仍未完成，本阶段不部署固件。

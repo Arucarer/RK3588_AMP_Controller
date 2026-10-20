@@ -3,7 +3,7 @@
 
 #include "motor_sim.h"
 
-/* SIM only; not connected to existing IPC or main initialization yet. */
+/* SIM only; created by main and controlled through the motor IPC bridge. */
 enum { AMP_MOTOR_REQUEST_CONTROL, AMP_MOTOR_REQUEST_INJECT };
 
 typedef struct {
@@ -37,7 +37,7 @@ typedef struct {
  * Snapshot queries may be made independently by tasks.
  * submit: 0 accepted, -1 invalid/busy/uninitialized.
  * receive/snapshot: 1 available, 0 unavailable, -1 invalid pointer.
- * Producer authorization and session/duplicate filtering belong to future IPC.
+ * IPC bridge owns control-token checks; IpcTask owns sessions/duplicate filtering.
  */
 int amp_motor_task_init(void);
 int amp_motor_task_submit(const AmpMotorRequest *request);
